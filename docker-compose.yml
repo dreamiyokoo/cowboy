@@ -1,0 +1,88 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cowboy}
+      POSTGRES_USER: ${POSTGRES_USER:-cowboy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cowboy}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cowboy}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-cowboy}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production-please-update}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-1440}
+      SEED_USERNAME: ${SEED_USERNAME:-admin}
+      SEED_PASSWORD: ${SEED_PASSWORD:-changeme}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8002:8000"
+
+  capture:
+    build: ./capture
+    environment:
+      CAPTURE_USERNAME: ${CAPTURE_USERNAME}
+      CAPTURE_PASSWORD: ${CAPTURE_PASSWORD}
+      API_BASE_URL: http://api:8000
+      ADB_SERVER_SOCKET: tcp:host.docker.internal:5037
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./capture:/app
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ""
+    environment:
+      HOSTNAME: "0.0.0.0"
+      API_INTERNAL_URL: "http://api:8000"
+      FRONTEND_BASIC_AUTH_USER: ${FRONTEND_BASIC_AUTH_USER:-}
+      FRONTEND_BASIC_AUTH_PASS: ${FRONTEND_BASIC_AUTH_PASS:-}
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.5.0
+    command: tunnel --no-autoupdate --protocol http2 run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - frontend
+      - api
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  redis_data:

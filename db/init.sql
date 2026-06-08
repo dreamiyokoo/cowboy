@@ -1,0 +1,2 @@
+-- Schema is managed by Alembic migrations (alembic upgrade head).
+-- This file is intentionally left empty to avoid conflicts.
