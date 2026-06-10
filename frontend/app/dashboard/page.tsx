@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import {
   buildChartData,
   CowboyBullDiffChart,
@@ -17,6 +18,7 @@ import {
   fetchStats,
   fetchGames,
   fetchCapturePreview,
+  fetchCardStatSingle,
   fmtAmount,
   RESULT_LABEL,
   RESULT_COLOR,
@@ -33,6 +35,7 @@ import {
   type GamesResponse,
   type GameResult,
   type CapturePreview,
+  type CardStatsItem,
 } from "@/app/lib/api";
 
 const REFRESH_INTERVAL = 30_000;
@@ -48,6 +51,14 @@ export default function DashboardPage() {
   const [showCapture, setShowCapture] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const previewTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastFetchedCardRef = useRef<string | null>(null);
+
+  const [limit, setLimit] = useState(100);
+  const [selectedLogText, setSelectedLogText] = useState<string | null>(null);
+  const [selectedLogTitle, setSelectedLogTitle] = useState("");
+  const [isLogModalOpen, setIsLogModalOpen] = useState(false);
+  const [isLoadingLog, setIsLoadingLog] = useState(false);
+  const [cardStat, setCardStat] = useState<CardStatsItem | null>(null);
 
   function logout() {
     clearAccessToken();
@@ -60,7 +71,7 @@ export default function DashboardPage() {
     try {
       const [s, g] = await Promise.all([
         fetchStats(token),
-        fetchGames(token, 100, 0),
+        fetchGames(token, limit, 0),
       ]);
       setStats(s);
       setGamesData(g);
@@ -81,8 +92,46 @@ export default function DashboardPage() {
     try {
       const p = await fetchCapturePreview(token);
       setPreview(p);
+      // 投票中にオープンカードが検出されたとき、統計データを取得する
+      if (p && p.open_card && p.open_card !== lastFetchedCardRef.current) {
+        lastFetchedCardRef.current = p.open_card;
+        try {
+          const stat = await fetchCardStatSingle(token, p.open_card);
+          setCardStat(stat);
+        } catch {
+          setCardStat(null);
+        }
+      }
+      // カードが消えたらリセット
+      if (!p || !p.open_card) {
+        lastFetchedCardRef.current = null;
+        setCardStat(null);
+      }
     } catch {
       // プレビュー取得失敗は無視
+    }
+  }
+
+  async function handleViewLog(logFileName: string) {
+    const token = getValidAccessToken();
+    if (!token) return;
+    setIsLoadingLog(true);
+    setSelectedLogTitle(logFileName);
+    try {
+      const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
+      const res = await fetch(`${API_URL}/api/v1/games/logs/${logFileName}`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (!res.ok) throw new Error("ログの取得に失敗しました");
+      const text = await res.text();
+      setSelectedLogText(text);
+      setIsLogModalOpen(true);
+    } catch (err: any) {
+      alert(err.message || "ログファイルの取得に失敗しました");
+    } finally {
+      setIsLoadingLog(false);
     }
   }
 
@@ -97,7 +146,7 @@ export default function DashboardPage() {
       if (previewTimerRef.current) clearInterval(previewTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [limit]);
 
   const games = gamesData?.games ?? [];
 
@@ -113,6 +162,24 @@ export default function DashboardPage() {
               更新: {lastUpdated.toLocaleTimeString("ja-JP")}
             </span>
           )}
+          <Link
+            href="/predictions"
+            className="text-sm px-3 py-1 rounded bg-yellow-950/40 hover:bg-yellow-900/60 border border-yellow-900/30 transition text-yellow-300 font-medium"
+          >
+            🔮 AI予測
+          </Link>
+          <Link
+            href="/card-stats"
+            className="text-sm px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 transition text-gray-300 font-medium"
+          >
+            📊 勝率統計
+          </Link>
+          <Link
+            href="/admin"
+            className="text-sm px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 transition text-gray-300 font-medium"
+          >
+            ⚙️ 管理画面
+          </Link>
           <button
             onClick={load}
             className="text-sm px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 transition"
@@ -149,6 +216,8 @@ export default function DashboardPage() {
                   {preview.round_number != null && <span>R{preview.round_number}</span>}
                   {preview.game_state === "result" && <span className="text-green-400">✓ 結果表示</span>}
                   {preview.game_state === "betting" && <span className="text-yellow-400">投票中</span>}
+                  {preview.game_state === "preparing" && <span className="text-blue-400">準備中</span>}
+                  {preview.game_state === "cooldown" && <span className="text-gray-400">待機中</span>}
                   {preview.result && <span className={RESULT_COLOR[preview.result as GameResult]?.split(" ")[1]}>{RESULT_LABEL[preview.result as GameResult]}</span>}
                 </span>
               )}
@@ -167,12 +236,16 @@ export default function DashboardPage() {
                     ? "bg-green-900 text-green-300"
                     : preview.game_state === "betting"
                     ? "bg-yellow-900 text-yellow-300"
-                    : "bg-gray-700 text-gray-300"
+                    : preview.game_state === "preparing"
+                    ? "bg-blue-900 text-blue-300"
+                    : "bg-gray-800 text-gray-400"
                 }`}>
                   {preview.game_state === "result"
                     ? "✓ 結果表示"
                     : preview.game_state === "betting"
                     ? `🗳️ 投票中${preview.remaining_seconds != null ? ` (残り${Math.round(preview.remaining_seconds)}s)` : ""}`
+                    : preview.game_state === "preparing"
+                    ? "🔄 準備中 (シャッフル)"
                     : "待機中"}
                 </span>
               )}
@@ -212,9 +285,39 @@ export default function DashboardPage() {
               <div className="space-y-2 text-sm shrink-0">
                 <InfoRow label="状態" value={
                   preview?.game_state === "result" ? "結果表示"
-                  : preview?.game_state === "betting" ? "投票中"
+                  : preview?.game_state === "betting" ? (
+                      preview.remaining_seconds != null
+                        ? `🗳️ 投票中 (残り ${Math.round(preview.remaining_seconds)}s)`
+                        : "🗳️ 投票中"
+                    )
+                  : preview?.game_state === "preparing" ? "🔄 準備中"
+                  : preview?.game_state === "cooldown" ? (
+                      preview.remaining_seconds != null
+                        ? `💤 待機中 (残り ${Math.round(preview.remaining_seconds)}s)`
+                        : "💤 待機中"
+                    )
                   : "—"
                 } />
+                {preview?.open_detected_at && (
+                  <InfoRow
+                    label="オープン検出"
+                    value={(() => {
+                      const t = new Date(preview.open_detected_at);
+                      const diff = Math.max(0, Math.round((new Date().getTime() - t.getTime()) / 1000));
+                      return `${t.toLocaleTimeString("ja-JP")} (${diff}s経過)`;
+                    })()}
+                  />
+                )}
+                {preview?.result_detected_at && (
+                  <InfoRow
+                    label="結果検出"
+                    value={(() => {
+                      const t = new Date(preview.result_detected_at);
+                      const diff = Math.max(0, Math.round((new Date().getTime() - t.getTime()) / 1000));
+                      return `${t.toLocaleTimeString("ja-JP")} (${diff}s経過)`;
+                    })()}
+                  />
+                )}
                 <InfoRow label="ラウンド" value={preview?.round_number != null ? String(preview.round_number) : "—"} highlight />
                 <InfoRow label="オープンカード" value={preview?.open_card ?? "—"} highlight />
                 <InfoRow label="検出結果" value={preview?.result ? (RESULT_LABEL[preview.result as GameResult] ?? preview.result) : "—"} />
@@ -345,6 +448,84 @@ export default function DashboardPage() {
           </>)}
         </section>
 
+        {/* オープンカード統計パネル */}
+        {cardStat && (
+          <section className="bg-gray-900 rounded-xl border border-amber-800/50 overflow-hidden">
+            <div className="flex items-center gap-3 px-4 py-2.5 bg-amber-900/20 border-b border-amber-800/40">
+              <span className="text-amber-400 text-sm font-bold">📊 オープンカード統計</span>
+              <span className="text-2xl font-black text-white tracking-wider">{cardStat.card}</span>
+              <span className="text-xs text-gray-400 ml-auto">{cardStat.total}ゲーム分</span>
+            </div>
+            <div className="p-3 space-y-1.5 text-xs font-semibold">
+              {/* 上段: カウボーイ・投票・ブル */}
+              <div className="grid grid-cols-3 gap-1.5">
+                {(["cowboy", "draw", "bull"] as const).map((key) => {
+                  const pct = Math.round(cardStat.rates[key] * 100);
+                  const labels: Record<string, string> = { cowboy: "カウボーイ", draw: "投票", bull: "ブル" };
+                  const colors: Record<string, string> = { cowboy: "text-red-400", draw: "text-green-400", bull: "text-blue-400" };
+                  return (
+                    <div key={key} className={`rounded px-2 py-1.5 text-center ${pct >= 50 ? "bg-amber-500/30 border border-amber-500/60" : "bg-gray-800/60 border border-gray-700/40"}`}>
+                      <div className={`text-[10px] ${colors[key]}`}>{labels[key]}</div>
+                      <div className={`text-base font-black ${pct >= 50 ? "text-amber-300" : "text-gray-300"}`}>{pct}%</div>
+                    </div>
+                  );
+                })}
+              </div>
+              {/* 区切り */}
+              <div className="border-t border-gray-700/50" />
+              {/* 下段: 左列（任意ハンド）と右列（勝利ハンド）を横並び */}
+              <div className="flex gap-1.5">
+                {/* 左列: FL/CN / 1ペア / Aペア */}
+                <div className="flex flex-col gap-1.5 flex-1">
+                  {(["any_flash", "any_pair", "any_ace"] as const).map((key) => {
+                    const pct = Math.round(cardStat.rates[key] * 100);
+                    const labels: Record<string, string> = { any_flash: "FL/CN", any_pair: "1ペア", any_ace: "Aペア" };
+                    return (
+                      <div key={key} className={`rounded px-2 py-1.5 text-center ${pct >= 50 ? "bg-amber-500/30 border border-amber-500/60" : "bg-gray-800/60 border border-gray-700/40"}`}>
+                        <div className="text-[10px] text-gray-400">{labels[key]}</div>
+                        <div className={`text-base font-black ${pct >= 50 ? "text-amber-300" : "text-gray-300"}`}>{pct}%</div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {/* セパレーター */}
+                <div className="w-px bg-gray-700/50" />
+                {/* 右列: ハイ/1P + 2ペア / 3K+ + FH / 4K+ */}
+                <div className="flex flex-col gap-1.5 flex-1">
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {(["win_high", "win_two"] as const).map((key) => {
+                      const pct = Math.round(cardStat.rates[key] * 100);
+                      const labels: Record<string, string> = { win_high: "ハイ/1P", win_two: "2ペア" };
+                      return (
+                        <div key={key} className={`rounded px-2 py-1.5 text-center ${pct >= 50 ? "bg-amber-500/30 border border-amber-500/60" : "bg-gray-800/60 border border-gray-700/40"}`}>
+                          <div className="text-[10px] text-gray-400">{labels[key]}</div>
+                          <div className={`text-base font-black ${pct >= 50 ? "text-amber-300" : "text-gray-300"}`}>{pct}%</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {(["win_sf", "win_fh"] as const).map((key) => {
+                      const pct = Math.round(cardStat.rates[key] * 100);
+                      const labels: Record<string, string> = { win_sf: "3K+", win_fh: "FH" };
+                      return (
+                        <div key={key} className={`rounded px-2 py-1.5 text-center ${pct >= 50 ? "bg-amber-500/30 border border-amber-500/60" : "bg-gray-800/60 border border-gray-700/40"}`}>
+                          <div className="text-[10px] text-gray-400">{labels[key]}</div>
+                          <div className={`text-base font-black ${pct >= 50 ? "text-amber-300" : "text-gray-300"}`}>{pct}%</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className={`rounded px-2 py-1.5 text-center ${Math.round(cardStat.rates.win_four * 100) >= 50 ? "bg-amber-500/30 border border-amber-500/60" : "bg-gray-800/60 border border-gray-700/40"}`}>
+                    <div className="text-[10px] text-gray-400">4K+</div>
+                    <div className={`text-base font-black ${Math.round(cardStat.rates.win_four * 100) >= 50 ? "text-amber-300" : "text-gray-300"}`}>{Math.round(cardStat.rates.win_four * 100)}%</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
+
         {/* 統計カード */}
         {stats && (
           <>
@@ -391,18 +572,38 @@ export default function DashboardPage() {
           </section>
         )}
 
-        {/* グラフ */}
-        {games.length >= 2 && (() => {
-          const chartData = buildChartData(games);
-          return (
-            <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <CowboyBullDiffChart data={chartData} />
-              <CumulPnlChart data={chartData} />
-              <PayoutChart data={chartData} />
-              <BetTotalChart data={chartData} />
-            </section>
-          );
-        })()}
+        {/* グラフと期間フィルター */}
+        {games.length >= 2 && (
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-semibold text-gray-400">分析グラフ</h2>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500 font-medium">集計期間:</span>
+                <select
+                  value={limit}
+                  onChange={(e) => setLimit(Number(e.target.value))}
+                  className="bg-gray-900 border border-gray-800 text-gray-300 text-xs rounded px-2.5 py-1 focus:outline-none focus:border-yellow-400 cursor-pointer font-medium"
+                >
+                  <option value={50}>直近 50 件</option>
+                  <option value={100}>直近 100 件</option>
+                  <option value={200}>直近 200 件</option>
+                  <option value={1000}>全件を表示</option>
+                </select>
+              </div>
+            </div>
+            {(() => {
+              const chartData = buildChartData(games);
+              return (
+                <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <CowboyBullDiffChart data={chartData} />
+                  <CumulPnlChart data={chartData} />
+                  <PayoutChart data={chartData} />
+                  <BetTotalChart data={chartData} />
+                </section>
+              );
+            })()}
+          </div>
+        )}
 
         {/* ゲーム履歴テーブル */}
         {games.length > 0 && (
@@ -431,7 +632,7 @@ export default function DashboardPage() {
                 </thead>
                 <tbody className="divide-y divide-gray-800">
                   {games.map((g) => (
-                    <GameRow key={g.id} game={g} />
+                    <GameRow key={g.id} game={g} onViewLog={handleViewLog} />
                   ))}
                 </tbody>
               </table>
@@ -441,6 +642,28 @@ export default function DashboardPage() {
 
         {!stats && !error && (
           <div className="text-center text-gray-500 py-16">読み込み中…</div>
+        )}
+
+        {/* ログビューアーモーダル */}
+        {isLogModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
+            <div className="bg-gray-950 border border-gray-800 rounded-xl max-w-4xl w-full max-h-[85vh] flex flex-col p-6 shadow-2xl">
+              <div className="flex items-center justify-between border-b border-gray-800 pb-3">
+                <h3 className="text-sm font-semibold text-yellow-400 font-mono">
+                  📄 Round Log: {selectedLogTitle}
+                </h3>
+                <button
+                  onClick={() => setIsLogModalOpen(false)}
+                  className="text-gray-500 hover:text-gray-300 transition text-xs font-semibold px-2 py-1 bg-gray-900 rounded border border-gray-800"
+                >
+                  閉じる
+                </button>
+              </div>
+              <pre className="overflow-auto text-xs text-gray-300 font-mono bg-black/50 p-4 rounded border border-gray-900/50 mt-4 flex-1 whitespace-pre-wrap select-text">
+                {selectedLogText || "ログの内容がありません"}
+              </pre>
+            </div>
+          </div>
         )}
       </main>
     </div>
@@ -553,7 +776,27 @@ function Th({ children }: { children: React.ReactNode }) {
   );
 }
 
-function GameRow({ game }: { game: Game }) {
+function CopyButton({ value, title }: { value: string; title?: string }) {
+  const [copied, setCopied] = useState(false);
+  function handleCopy() {
+    navigator.clipboard.writeText(value).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    });
+  }
+  return (
+    <button
+      onClick={handleCopy}
+      title={title ?? `"${value}" をコピー`}
+      className="ml-1 px-1 py-0.5 rounded text-xs font-mono transition
+        bg-gray-700 hover:bg-gray-600 text-gray-400 hover:text-white active:scale-95"
+    >
+      {copied ? <span className="text-green-400">✓</span> : <span>⎘</span>}
+    </button>
+  );
+}
+
+function GameRow({ game, onViewLog }: { game: Game; onViewLog: (logFile: string) => void | Promise<void>; key?: any }) {
   const colorCls = RESULT_COLOR[game.result as GameResult] ?? "bg-gray-800 text-gray-300";
   const dt = new Date(game.recorded_at);
   const dtStr = `${dt.getMonth() + 1}/${dt.getDate()} ${dt.getHours().toString().padStart(2,"0")}:${dt.getMinutes().toString().padStart(2,"0")}`;
@@ -567,7 +810,29 @@ function GameRow({ game }: { game: Game }) {
         </span>
       </td>
       <td className="px-3 py-1.5 text-gray-400">{game.round_number ?? "—"}</td>
-      <td className="px-3 py-1.5 font-mono text-yellow-300">{game.open_card ?? "—"}</td>
+      <td className="px-1 py-1">
+        <div className="flex items-center gap-1">
+          {game.card_image && (
+            <CardThumb src={game.card_image} label={game.open_card ?? ""} />
+          )}
+          <span className="font-mono text-yellow-300 text-xs">{game.open_card ?? "—"}</span>
+          {game.open_card && (
+            <CopyButton
+              value={game.ocr_debug ?? game.open_card}
+              title={game.ocr_debug ? "DEBUGログをコピー" : "カード名をコピー"}
+            />
+          )}
+          
+          {game.ocr_debug && (
+            <div className="relative group ml-1 flex items-center">
+              <span className="text-gray-400 hover:text-gray-200 cursor-help text-xs p-0.5 bg-gray-800 rounded select-none">ℹ️</span>
+              <div className="absolute left-0 bottom-full mb-1.5 hidden group-hover:block bg-gray-900 border border-gray-700 text-gray-200 text-[10px] rounded p-2.5 whitespace-pre z-50 shadow-2xl font-mono max-w-xs md:max-w-md pointer-events-none">
+                {game.ocr_debug}
+              </div>
+            </div>
+          )}
+        </div>
+      </td>
       <td className="px-3 py-1.5 text-right text-amber-400 font-mono text-xs">{game.jackpot_stock != null ? fmtAmount(game.jackpot_stock) : "—"}</td>
       {BET_COLUMNS.map((c) => (
         <td key={c.key} className="px-3 py-1.5 text-right text-gray-300">
@@ -611,7 +876,34 @@ function GameRow({ game }: { game: Game }) {
           </>
         );
       })()}
-      <td className="px-3 py-1.5 text-gray-500 whitespace-nowrap">{dtStr}</td>
+      <td className="px-3 py-1.5 text-gray-500 whitespace-nowrap">
+        <div className="flex items-center gap-2">
+          <span>{dtStr}</span>
+          {game.log_file_name && (
+            <button
+              onClick={() => onViewLog(game.log_file_name!)}
+              title="ラウンドログを表示"
+              className="px-1.5 py-0.5 rounded text-[10px] bg-gray-900 border border-gray-800 hover:bg-gray-800 text-gray-400 hover:text-white transition font-mono active:scale-95"
+            >
+              📝 ログ
+            </button>
+          )}
+        </div>
+      </td>
     </tr>
+  );
+}
+
+function CardThumb({ src, label }: { src: string; label: string }) {
+  return (
+    <a href={src} target="_blank" rel="noreferrer" title={`${label} クリックで拡大`}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={src}
+        alt={label}
+        className="rounded border border-gray-600 cursor-zoom-in hover:opacity-80 transition bg-gray-800"
+        style={{ width: 28, height: 40, objectFit: "cover" }}
+      />
+    </a>
   );
 }

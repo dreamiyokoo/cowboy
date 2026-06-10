@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from routers.auth import router as auth_router
 from routers.capture import router as capture_router
 from routers.games import router as games_router
+from routers.admin import router as admin_router
 
 app = FastAPI(title="Cowboy API")
 
@@ -20,6 +21,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(games_router)
 app.include_router(capture_router)
+app.include_router(admin_router)
 
 
 @app.get("/api/v1/health")

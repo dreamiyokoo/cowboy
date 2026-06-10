@@ -21,6 +21,7 @@ capture.py — ADB スクリーンショット → 画像解析 → /api/v1/game
 """
 
 import argparse
+import atexit
 import base64
 import os
 import re
@@ -59,9 +60,61 @@ def _get_ocr_reader():
         print("[INFO] EasyOCR ロード完了")
     return _ocr_reader
 
-# ────────────────────────────────────────────────
-# 設定読み込み
-# ────────────────────────────────────────────────
+class LogCapturer:
+    def __init__(self):
+        self.buffer = []
+        self.original_stdout = sys.stdout
+
+    def write(self, message):
+        self.original_stdout.write(message)
+        stripped = message.strip()
+        if stripped:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            self.buffer.append(f"[{timestamp}] {stripped}")
+
+    def flush(self):
+        self.original_stdout.flush()
+
+    def reset(self):
+        self.buffer = []
+
+    def get_logs(self) -> str:
+        return "\n".join(self.buffer)
+
+
+def save_round_log(capturer: LogCapturer, round_number: int | None) -> str:
+    log_dir = Path("/app/logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if round_number is not None:
+        filename = f"{round_number}.log"
+    else:
+        filename = f"error_{timestamp}.log"
+        
+    filepath = log_dir / filename
+    
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(capturer.get_logs())
+    except Exception as e:
+        # original_stdout を使って直接コンソールに出力する（ループ無限再帰を避けるため）
+        capturer.original_stdout.write(f"[WARN] ログファイル書き込み失敗: {e}\n")
+        
+    # ローテーション（最大100件）
+    try:
+        log_files = sorted(
+            log_dir.glob("*.log"),
+            key=lambda x: x.stat().st_mtime
+        )
+        if len(log_files) > 100:
+            for f in log_files[:-100]:
+                f.unlink(missing_ok=True)
+    except Exception as e:
+        capturer.original_stdout.write(f"[WARN] ログローテーションでエラー発生: {e}\n")
+        
+    return filename
+
 
 CONFIG_PATH = Path(__file__).parent / "config.yml"
 
@@ -78,13 +131,32 @@ def load_config() -> dict:
     return cfg
 
 
+def is_card_back_green(img: np.ndarray, crop: list[int]) -> bool:
+    """カード裏面（緑色）かどうかを判定する"""
+    y0, y1, x0, x1 = crop
+    region = img[y0:y1, x0:x1]
+    if region.size == 0:
+        return False
+    hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+    # 緑色のHSV範囲をより厳格に設定（高彩度・高明度のみ）
+    # H: 35〜85, S: 80〜255, V: 70〜255
+    green_mask = cv2.inRange(hsv, np.array([35, 80, 70]), np.array([85, 255, 255]))
+    total = region.size // 3
+    if total == 0:
+        return False
+    ratio = np.count_nonzero(green_mask) / total
+    return ratio > 0.55
+
+
 # ────────────────────────────────────────────────
 # ステート定義
 # ────────────────────────────────────────────────
 
 class State(Enum):
-    WATCHING = "watching"   # 結果が出るのを待っている（オープンカードも随時取得）
-    COOLDOWN = "cooldown"   # 結果POST後のクールダウン中
+    PREPARING = "preparing"  # 準備中（カードが裏面）
+    BETTING   = "betting"    # ベット受付中・結果待ち（カードが表面）
+    RESULT    = "result"     # 結果表示中（WIN検出）
+    COOLDOWN  = "cooldown"   # 結果POST後のクールダウン中
 
 
 # ────────────────────────────────────────────────
@@ -152,6 +224,39 @@ def encode_crop(img: np.ndarray, crop: list[int], scale: int = 3) -> str | None:
         return None
     large = cv2.resize(region, None, fx=scale, fy=scale, interpolation=cv2.INTER_LANCZOS4)
     return encode_jpeg(large, quality=85)
+
+
+# カード画像の保存先（ローテーション用）
+_CARD_SHOTS_DIR = Path(__file__).parent / "card_shots"
+_CARD_SHOTS_MAX = 100
+
+
+def _save_card_shot(game_id: int, card: str, img: np.ndarray, crop: list[int] | None = None) -> None:
+    """
+    オープンカードのクロップ画像を card_shots/{id}_{card}.jpg に保存する。
+    最新 _CARD_SHOTS_MAX 件を超えた分は古い順に削除してローテーションする。
+    """
+    try:
+        _CARD_SHOTS_DIR.mkdir(exist_ok=True)
+        if crop is not None:
+            y0, y1, x0, x1 = crop
+            region = img[y0:y1, x0:x1]
+        else:
+            region = img
+        if region.size == 0:
+            return
+        # 4倍拡大してJPEG保存（OCR精度確認用）
+        large = cv2.resize(region, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
+        filename = _CARD_SHOTS_DIR / f"{game_id}_{card}.jpg"
+        cv2.imwrite(str(filename), large, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+
+        # ローテーション: 古いファイルを削除
+        shots = sorted(_CARD_SHOTS_DIR.glob("*.jpg"), key=lambda p: p.stat().st_mtime)
+        while len(shots) > _CARD_SHOTS_MAX:
+            shots[0].unlink(missing_ok=True)
+            shots = shots[1:]
+    except Exception as e:
+        print(f"[WARN] card_shot 保存失敗: {e}", file=sys.stderr)
 
 
 # ────────────────────────────────────────────────
@@ -290,57 +395,371 @@ def _parse_card_text(text: str, region: np.ndarray) -> str | None:
     return f"{rank}{suit}" if suit else rank
 
 
-def detect_open_card(img: np.ndarray, crop: list[int], scale: int, debug: bool = False) -> str | None:
+def enhance_card_image(img: np.ndarray) -> np.ndarray:
+    """
+    画像を完全に「白 (255,255,255)」「赤 (0,0,255)」「黒 (0,0,0)」の3色のみに強制変換（減色）する。
+    カードの背景の影や曖昧なグレーを完全に排除します。
+    """
+    if img is None or img.size == 0:
+        return img
+    try:
+        # 1. チャンネル分割と型キャスト（オーバーフロー防止）
+        b_ch, g_ch, r_ch = cv2.split(img)
+        r_int = r_ch.astype(np.int16)
+        g_int = g_ch.astype(np.int16)
+        b_int = b_ch.astype(np.int16)
+        
+        # 2. 赤色領域の抽出（R - B > 35 かつ R - G > 30）
+        # テーブル background や warm gray を赤と誤判定するのを防ぎます
+        red_mask = ((r_int - b_int) > 35) & ((r_int - g_int) > 30)
+        
+        # 3. 赤以外の部分を白黒（二値化）判定する
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        min_v, max_v, _, _ = cv2.minMaxLoc(gray)
+        
+        # 適応的な閾値の決定（最小値と最大値の中間値）
+        if max_v - min_v > 15:
+            thresh_val = min_v + (max_v - min_v) * 0.45
+        else:
+            thresh_val = 127
+            
+        _, binary = cv2.threshold(gray, thresh_val, 255, cv2.THRESH_BINARY)
+        
+        # 4. 3色の出力画像を合成
+        # デフォルトは白 (255, 255, 255)
+        out = np.full_like(img, 255)
+        
+        # 二値化で閾値未満（黒）の部分を (0, 0, 0) に設定
+        out[binary == 0] = [0, 0, 0]
+        
+        # 赤色マスクの部分を (0, 0, 255) に強制上書き
+        out[red_mask] = [0, 0, 255]
+        
+        return out
+    except Exception as e:
+        print(f"[WARNING] enhance_card_image failed: {e}")
+        return img
+
+
+def detect_open_card(
+    img: np.ndarray,
+    crop: list[int] | None,
+    rank_crop: list[int] | None = None,
+    suit_crop: list[int] | None = None,
+    scale: int = 4,
+    debug: bool = False,
+    debug_logs: list[str] | None = None
+) -> str | None:
     """
     オープンカード領域から カード文字列 (例: "AH", "KS", "10D") を OCR で取得する。
-    Tesseract で試み、取得できなければ EasyOCR にフォールバック。
+    - 緑（裏面）検出時は None を返す
+    - rank_crop / suit_crop が指定されている場合、それぞれ絶対座標として切り出して個別に解析する
     """
-    y0, y1, x0, x1 = crop
-    region = img[y0:y1, x0:x1]
+    # 1. 全体領域（裏面判定・キャッシュ保存の基準）
+    if crop is not None:
+        y0, y1, x0, x1 = crop
+        region = img[y0:y1, x0:x1]
+    else:
+        region = img
     if region.size == 0:
         return None
 
-    large = cv2.resize(region, None, fx=scale, fy=scale, interpolation=cv2.INTER_LANCZOS4)
-    gray = cv2.cvtColor(large, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    h, w = region.shape[:2]
 
-    # Tesseract: PSM 8（単一ワード）で試みる
-    config = "--oem 1 --psm 8 -c tessedit_char_whitelist=AKQJakqj0123456789SHDCshdc"
-    tess_text = pytesseract.image_to_string(thresh, config=config).strip()
+    # ── 裏面（緑）チェック ──────────────────────
+    hsv_full = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+    # is_card_back_greenと同様に厳格な範囲を使用し、誤検知を防ぐ
+    green_mask = cv2.inRange(hsv_full, np.array([35, 80, 70]), np.array([85, 255, 255]))
+    green_ratio = np.count_nonzero(green_mask) / (h * w) if h * w > 0 else 0
+    if green_ratio > 0.45:
+        msg = f"[DEBUG] open_card: 緑裏面検出 (green_ratio={green_ratio:.2f}) → スキップ"
+        if debug:
+            print(msg)
+        if debug_logs is not None:
+            debug_logs.append(msg)
+        return None
+
+    # ── ランク認識 ──────────────────
+    if rank_crop is not None:
+        ry0, ry1, rx0, rx1 = rank_crop
+        rank_region = img[ry0:ry1, rx0:rx1]
+    else:
+        # フォールバック: 比率で切り出す
+        rank_end_ratio = 0.40
+        try:
+            cfg = load_config()
+            ratios = cfg.get("capture", {}).get("open_card_ratios", {})
+            if ratios:
+                rank_end_ratio = ratios.get("rank_end", rank_end_ratio)
+        except Exception:
+            pass
+        rank_region = region[0:int(h * rank_end_ratio), :]
+
+    if rank_region.size == 0:
+        return None
+
+    large_rank = cv2.resize(rank_region, None, fx=scale, fy=scale, interpolation=cv2.INTER_LANCZOS4)
+    gray_rank = cv2.cvtColor(large_rank, cv2.COLOR_BGR2GRAY)
+
+    # 明るさの変化に対応するため、複数の入力バリエーションで OCR を試みる
+    _, thresh_otsu = cv2.threshold(gray_rank, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, thresh_fixed = cv2.threshold(gray_rank, 127, 255, cv2.THRESH_BINARY)
+
+    inputs_to_try = [thresh_otsu, thresh_fixed, gray_rank]
+    config_rank = "--oem 1 --psm 8 -c tessedit_char_whitelist=AKQJ0123456789"
+    rank = None
+
+    for inp in inputs_to_try:
+        tess_rank = re.sub(r"\s+", "", pytesseract.image_to_string(inp, config=config_rank).strip().upper())
+        msg = f"[DEBUG] rank Tesseract try: {repr(tess_rank)}"
+        if debug:
+            print(msg)
+        if debug_logs is not None:
+            debug_logs.append(msg)
+        for r in ["10", "A", "K", "Q", "J", "9", "8", "7", "6", "5", "4", "3", "2"]:
+            if r in tess_rank:
+                rank = r
+                break
+        if rank is not None:
+            break
+
+    # EasyOCR フォールバック（ランク）
+    if rank is None:
+        reader = _get_ocr_reader()
+        if reader is not None:
+            easy_rank = re.sub(r"\s+", "", " ".join(reader.readtext(large_rank, detail=0)).upper())
+            msg = f"[DEBUG] rank EasyOCR raw: {repr(easy_rank)}"
+            if debug:
+                print(msg)
+            if debug_logs is not None:
+                debug_logs.append(msg)
+            for r in ["10", "A", "K", "Q", "J", "9", "8", "7", "6", "5", "4", "3", "2"]:
+                if r in easy_rank:
+                    rank = r
+                    break
+
+    if rank is None:
+        return None
+
+    # ── スート認識 ────────
+    if suit_crop is not None:
+        sy0, sy1, sx0, sx1 = suit_crop
+        suit_region = img[sy0:sy1, sx0:sx1]
+    else:
+        # フォールバック: 比率で切り出す
+        suit_start_ratio = 0.45
+        suit_end_ratio = 0.80
+        try:
+            cfg = load_config()
+            ratios = cfg.get("capture", {}).get("open_card_ratios", {})
+            if ratios:
+                suit_start_ratio = ratios.get("suit_start", suit_start_ratio)
+                suit_end_ratio = ratios.get("suit_end", suit_end_ratio)
+        except Exception:
+            pass
+        suit_region = region[int(h * suit_start_ratio):int(h * suit_end_ratio), :]
+
+    if suit_region.size == 0:
+        suit_region = region
 
     if debug:
-        print(f"[DEBUG] open_card Tesseract raw: {repr(tess_text)}")
-        cv2.imwrite("/tmp/cowboy_open_card.png", region)
-        cv2.imwrite("/tmp/cowboy_open_card_thresh.png", thresh)
+        cv2.imwrite("/tmp/cowboy_suit_region.png", suit_region)
 
-    result = _parse_card_text(tess_text, region)
-    if result:
-        return result
+    suit = _estimate_suit_by_color(suit_region, debug=debug, debug_logs=debug_logs)
 
-    # Tesseract で取れなかった場合 EasyOCR でフォールバック
-    reader = _get_ocr_reader()
-    if reader is not None:
-        easyocr_results = reader.readtext(large, detail=0)
-        easy_text = " ".join(easyocr_results)
+    msg = f"[DEBUG] rank={rank}  suit={suit}"
+    if debug:
+        print(msg)
+    if debug_logs is not None:
+        debug_logs.append(msg)
+
+    return f"{rank}{suit}"
+
+
+def _generate_suit_templates() -> dict[str, np.ndarray]:
+    """判定用の基準テンプレートマスク (32x32) を生成する"""
+    templates = {}
+    size = 32
+    cx, cy = size // 2, size // 2
+    
+    # 1. ダイヤ (♦)
+    img_d = np.zeros((size, size), dtype=np.uint8)
+    pts = np.array([[cx, 3], [size-4, cy], [cx, size-4], [3, cy]], np.int32)
+    cv2.fillPoly(img_d, [pts], 255)
+    templates["D"] = img_d
+
+    # 2. ハート (♥)
+    img_h = np.zeros((size, size), dtype=np.uint8)
+    # 簡易ハート: 2つの円と逆三角形
+    cv2.circle(img_h, (cx - 5, cy - 4), 6, 255, -1)
+    cv2.circle(img_h, (cx + 5, cy - 4), 6, 255, -1)
+    pts = np.array([[2, cy - 1], [size-3, cy - 1], [cx, size-3]], np.int32)
+    cv2.fillPoly(img_h, [pts], 255)
+    templates["H"] = img_h
+
+    # 3. スペード (♠)
+    img_s = np.zeros((size, size), dtype=np.uint8)
+    # 逆ハート + ステム
+    cv2.circle(img_s, (cx - 5, cy + 4), 6, 255, -1)
+    cv2.circle(img_s, (cx + 5, cy + 4), 6, 255, -1)
+    pts = np.array([[2, cy + 1], [size-3, cy + 1], [cx, 4]], np.int32)
+    cv2.fillPoly(img_s, [pts], 255)
+    # ステム
+    cv2.rectangle(img_s, (cx - 2, cy + 2), (cx + 2, size - 3), 255, -1)
+    pts_stem = np.array([[cx - 5, size - 3], [cx + 5, size - 3], [cx, cy + 2]], np.int32)
+    cv2.fillPoly(img_s, [pts_stem], 255)
+    templates["S"] = img_s
+
+    # 4. クラブ (♣)
+    img_c = np.zeros((size, size), dtype=np.uint8)
+    # 3つの円 + ステム
+    cv2.circle(img_c, (cx, cy - 6), 6, 255, -1)
+    cv2.circle(img_c, (cx - 6, cy + 1), 6, 255, -1)
+    cv2.circle(img_c, (cx + 6, cy + 1), 6, 255, -1)
+    # ステム
+    cv2.rectangle(img_c, (cx - 2, cy + 1), (cx + 2, size - 3), 255, -1)
+    pts_stem = np.array([[cx - 5, size - 3], [cx + 5, size - 3], [cx, cy + 1]], np.int32)
+    cv2.fillPoly(img_c, [pts_stem], 255)
+    templates["C"] = img_c
+
+    return templates
+
+
+def _calc_iou(mask1: np.ndarray, mask2: np.ndarray) -> float:
+    intersection = np.count_nonzero(cv2.bitwise_and(mask1, mask2))
+    union = np.count_nonzero(cv2.bitwise_or(mask1, mask2))
+    return intersection / union if union > 0 else 0.0
+
+
+def _estimate_suit_by_color(card_img: np.ndarray, debug: bool = False, debug_logs: list[str] | None = None) -> str:
+    """
+    スート記号領域の画像からスート (H/D/S/C) を推定する。
+    入力はすでにランク文字を除いたスート記号のみの領域を想定。
+    """
+    if card_img.size == 0:
+        return "S"
+    h, w = card_img.shape[:2]
+
+    # ── スート記号領域を二値化 ────────────────────────
+    # 判定用に拡大
+    min_dim = min(card_img.shape[:2])
+    scale = max(2, 120 // min_dim)
+    work = cv2.resize(card_img, None, fx=scale, fy=scale, interpolation=cv2.INTER_LANCZOS4)
+
+    # ── 赤/黒を正確に判定 ────────────────────────
+    b_ch, g_ch, r_ch = cv2.split(work)
+    r_int = r_ch.astype(np.int16)
+    g_int = g_ch.astype(np.int16)
+    b_int = b_ch.astype(np.int16)
+    
+    # 拡大された高解像度画像で、赤色を示すピクセル (R - B > 35 かつ R - G > 30) の割合を算出
+    red_pixels = ((r_int - b_int) > 35) & ((r_int - g_int) > 30)
+    total_pixels = work.shape[0] * work.shape[1]
+    is_red = (total_pixels > 0) and (np.count_nonzero(red_pixels) / total_pixels > 0.04)
+
+    if is_red:
+        # 赤系: R - B > 40 のピクセルをスート部分として抽出 (元設定)
+        b_ch, _, r_ch = cv2.split(work)
+        diff = cv2.subtract(r_ch, b_ch)
+        _, suit_mask = cv2.threshold(diff, 40, 255, cv2.THRESH_BINARY)
+    else:
+        # 黒系: グレースケールに変換し、最小・最大輝度の中間値を閾値として動的に決定
+        gray_w = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
+        min_val, max_val, _, _ = cv2.minMaxLoc(gray_w)
+        if max_val - min_val > 20:
+            # 中間値 (45%) に設定。暗い状況でも背景の影を除外し、スートのエッジを鮮明に保ちます。
+            thresh_val = min_val + (max_val - min_val) * 0.45
+        else:
+            thresh_val = 105
+        _, suit_mask = cv2.threshold(gray_w, thresh_val, 255, cv2.THRESH_BINARY_INV)
+
+    # ── 最大輪郭を取得 ────────────────────────────────
+    contours, _ = cv2.findContours(suit_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return "H" if is_red else "S"
+
+    # 面積でフィルタ（ノイズ除去: 全体の2%以上）
+    min_area = suit_mask.shape[0] * suit_mask.shape[1] * 0.02
+    contours = [c for c in contours if cv2.contourArea(c) >= min_area]
+    if not contours:
+        return "H" if is_red else "S"
+
+    largest = max(contours, key=cv2.contourArea)
+
+    # ── テンプレートとの輪郭形状マッチング (cv2.matchShapes) ──
+    templates = _generate_suit_templates()
+    temp_contours = {}
+    for key, temp_img in templates.items():
+        conts, _ = cv2.findContours(temp_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if conts:
+            temp_contours[key] = max(conts, key=cv2.contourArea)
+        else:
+            temp_contours[key] = None
+
+    # Extent の計算
+    x, y, w, h = cv2.boundingRect(largest)
+    rect_area = w * h
+    contour_area = cv2.contourArea(largest)
+    extent = contour_area / rect_area if rect_area > 0 else 0.0
+
+    # 輪郭部分のマスクを切り出して 32x32 にリサイズ
+    roi_mask = suit_mask[y:y+h, x:x+w]
+    roi_resized = cv2.resize(roi_mask, (32, 32), interpolation=cv2.INTER_NEAREST)
+
+    if is_red:
+        score_d = cv2.matchShapes(largest, temp_contours["D"], cv2.CONTOURS_MATCH_I1, 0.0) if temp_contours["D"] is not None else 999.0
+        score_h = cv2.matchShapes(largest, temp_contours["H"], cv2.CONTOURS_MATCH_I1, 0.0) if temp_contours["H"] is not None else 999.0
+        iou_d = _calc_iou(roi_resized, templates["D"])
+        iou_h = _calc_iou(roi_resized, templates["H"])
+        
+        msg = f"[DEBUG] suit shape match (Red): D={score_d:.4f}, H={score_h:.4f} (extent={extent:.3f}, iou_d={iou_d:.3f}, iou_h={iou_h:.3f})"
         if debug:
-            print(f"[DEBUG] open_card EasyOCR raw: {repr(easy_text)}")
-        result = _parse_card_text(easy_text, region)
-        if result:
-            return result
+            print(msg)
+        if debug_logs is not None:
+            debug_logs.append(msg)
+            
+        # ダイヤは幾何学的にひし形（面積が外接矩形の約50%）になるため、占有率が 0.58 を超える場合はハートと判定します
+        if extent > 0.58:
+            return "H"
+        # matchShapes の score_d が極めて低い (< 0.035) = ダイヤテンプレートと高信頼一致
+        # → IoU より優先する (IoU は D/H で誤判定する場合がある)
+        if score_d < 0.035:
+            return "D"
+        # score_h が極めて低い (< 0.035) = ハートテンプレートと高信頼一致
+        if score_h < 0.035:
+            return "H"
+        # IoU の一致度が明らかに高い場合 (差が 0.04 以上)、IoU の判定を使用する
+        if abs(iou_d - iou_h) >= 0.04:
+            return "D" if iou_d > iou_h else "H"
+        return "D" if score_d < (score_h - 0.018) else "H"
+    else:
+        score_s = cv2.matchShapes(largest, temp_contours["S"], cv2.CONTOURS_MATCH_I1, 0.0) if temp_contours["S"] is not None else 999.0
+        score_c = cv2.matchShapes(largest, temp_contours["C"], cv2.CONTOURS_MATCH_I1, 0.0) if temp_contours["C"] is not None else 999.0
+        iou_s = _calc_iou(roi_resized, templates["S"])
+        iou_c = _calc_iou(roi_resized, templates["C"])
 
-    return None
+        msg = f"[DEBUG] suit shape match (Black): S={score_s:.4f}, C={score_c:.4f} (extent={extent:.3f}, iou_s={iou_s:.3f}, iou_c={iou_c:.3f})"
+        if debug:
+            print(msg)
+        if debug_logs is not None:
+            debug_logs.append(msg)
 
+        # ── 判定ロジック ─────────────────────────────────────────
+        # matchShapes の score_c が極めて低い (< 0.025) = クラブテンプレートと完全一致
+        # → クラブ(♣) と確定。IoU より優先する。
+        if score_c < 0.025:
+            return "C"
 
-def _estimate_suit_by_color(card_img: np.ndarray) -> str:
-    """カード画像の赤成分比率でスートを大まかに推定する"""
-    hsv = cv2.cvtColor(card_img, cv2.COLOR_BGR2HSV)
-    red1 = cv2.inRange(hsv, np.array([0, 80, 80]), np.array([10, 255, 255]))
-    red2 = cv2.inRange(hsv, np.array([160, 80, 80]), np.array([180, 255, 255]))
-    red_pixels = np.count_nonzero(cv2.bitwise_or(red1, red2))
-    total = card_img.shape[0] * card_img.shape[1]
-    if total > 0 and red_pixels / total > 0.03:
-        return "H"
-    return "S"
+        # score_s が十分低い (≤ 0.09) = スペードテンプレートと良く一致
+        # → スペード(♠) と確定。
+        if score_s <= 0.09:
+            return "S"
+
+        # 両スコアが中途半端な場合は IoU を使う (スペードの diff≈0.039 を拾うため閾値 0.03)
+        if abs(iou_s - iou_c) >= 0.03:
+            return "S" if iou_s > iou_c else "C"
+
+        return "S" if score_s < score_c else "C"
 
 
 # ────────────────────────────────────────────────
@@ -376,9 +795,9 @@ def detect_round_number(img: np.ndarray, crop: list[int], debug: bool = False) -
         text = pytesseract.image_to_string(inv_v, config=tess_base.format(psm=psm)).strip()
         if debug:
             print(f"[DEBUG] round Tess(V) psm={psm}: {repr(text)}")
-        nums = re.findall(r"\d{4,}", text)
+        nums = [n for n in re.findall(r"\d+", text) if len(n) == 6]
         if nums:
-            return int(max(nums, key=len))
+            return int(nums[0])
 
     # ── 方法2: グレースケール閾値 + Tesseract ────────────────────
     large_g = cv2.resize(region, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
@@ -391,9 +810,9 @@ def detect_round_number(img: np.ndarray, crop: list[int], debug: bool = False) -
         text = pytesseract.image_to_string(inv_g, config=tess_base.format(psm=psm)).strip()
         if debug:
             print(f"[DEBUG] round Tess(gray) psm={psm}: {repr(text)}")
-        nums = re.findall(r"\d{4,}", text)
+        nums = [n for n in re.findall(r"\d+", text) if len(n) == 6]
         if nums:
-            return int(max(nums, key=len))
+            return int(nums[0])
 
     # ── 方法3: EasyOCR + CLAHE (最終フォールバック) ─────────────
     reader = _get_ocr_reader()
@@ -408,9 +827,9 @@ def detect_round_number(img: np.ndarray, crop: list[int], debug: bool = False) -
         full_text = " ".join(results)
         if debug:
             print(f"[DEBUG] round EasyOCR: {repr(full_text)}")
-        nums = re.findall(r"\d{4,}", full_text)
+        nums = [n for n in re.findall(r"\d+", full_text) if len(n) == 6]
         if nums:
-            return int(max(nums, key=len))
+            return int(nums[0])
 
     return None
 
@@ -586,6 +1005,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
     poll_idle           = float(timing["poll_idle"])             # デフォルト 3s
     result_stable_count = int(timing["result_stable_count"])     # デフォルト 2
     result_timeout      = float(timing["result_timeout"])        # デフォルト 25s
+    result_check_delay  = float(timing.get("result_check_delay", 12.0))  # デフォルト 12s
 
     if not username or not password:
         print(
@@ -594,6 +1014,19 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    capturer = LogCapturer()
+    sys.stdout = capturer
+    atexit.register(lambda: setattr(sys, "stdout", capturer.original_stdout))
+
+    # 起動時に既存の error_*.log をクリーンアップ
+    log_dir = Path("/app/logs")
+    if log_dir.exists():
+        for f in log_dir.glob("error_*.log"):
+            try:
+                f.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     with httpx.Client() as client:
         # API 起動待ち
@@ -613,13 +1046,17 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
         token_refreshed_at = time.time()
 
         # ── ステートマシン初期値 ──────────────────────────────
-        state               = State.WATCHING
-        watching_start      = time.time()   # WATCHING に入った時刻（タイムアウト計測用）
+        state               = State.PREPARING
+        watching_start      = time.time()   # タイムアウト計測用
         cooldown_start      = 0.0           # COOLDOWN に入った時刻
         result_streak       = 0             # 同一結果の連続検出回数
         last_streak_result  = None          # 連続検出中の結果値
         latest_open_card    = None          # 最後に読み取ったオープンカード
         latest_round_number: int | None = None   # 最後に読み取ったラウンド番号
+        last_read_rn: int | None = None          # 直前に読み取った生ラウンド番号（ノイズ検証用）
+        rn_streak           = 0             # 生ラウンド番号の一致連続回数
+        last_confirmed_round: int | None = None  # 最後に正常終了/確定したラウンド番号
+        last_confirmed_time: float = 0.0         # 最後に確定した時刻
         open_detected_at: str | None = None      # オープンカード初回検出時刻
         result_detected_at: str | None = None    # 結果確定時刻
         # ベット額キャッシュ: WATCHING 中に継続更新し、POST 時に使用
@@ -628,12 +1065,21 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
         bet_last_updated    = 0.0           # EasyOCR 最終実行時刻（間引き用）
         BET_OCR_INTERVAL    = 3.0           # EasyOCR 実行間隔（秒）
         cached_jackpot_stock: int | None = None  # ジャックポットストックコイン
-
+        cached_card_image: np.ndarray | None = None  # 初回/更新時に切り出したオープンカード画像
+        bet_scanned_this_round = False
+        preview_last_sent   = 0.0           # プレビュー最終送信時刻
+        PREVIEW_INTERVAL    = 3.0           # プレビュー送信間隔（秒）—重いクロップ画像の間引き
+        send_preview_now    = False         # 即時送信フラグ（カードオープン直後等）
+        
+        ocr_debug_list: list[str] = []      # OCR詳細デバッグログ
+        log_file_name: str | None = None    # ログファイル名
+        capturer.reset()                    # ログバッファ初期化
+ 
         print(f"[INFO] ステートマシン開始: state={state.value}")
         print(f"[INFO] タイミング設定: cooldown={post_round_cooldown}s  "
               f"poll_fast={poll_fast}s  stable_count={result_stable_count}  "
               f"timeout={result_timeout}s")
-
+ 
         while True:
             # ── JWT 24時間で再取得 ────────────────────────────
             if time.time() - token_refreshed_at > 23 * 3600:
@@ -647,9 +1093,9 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                         print(f"[WARN] トークン再取得失敗 ({retry + 1}/3): {e}", file=sys.stderr)
                         if retry < 2:
                             time.sleep(2 ** retry)
-
+ 
             now = time.time()
-
+ 
             # ════════════════════════════════════════════════
             # COOLDOWN: 次ラウンド開始まで待つ
             # ════════════════════════════════════════════════
@@ -663,9 +1109,9 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     if once:
                         break
                     continue
-
-                # クールダウン終了 → WATCHING へ
-                state = State.WATCHING
+ 
+                # クールダウン終了 → PREPARING へ
+                state = State.PREPARING
                 watching_start = time.time()
                 result_streak = 0
                 last_streak_result = None
@@ -675,13 +1121,19 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                 result_detected_at = None
                 cached_bets = {k: None for k in ALL_BET_KEYS}
                 bet_last_updated = 0.0
-                print(f"[INFO] クールダウン終了 → WATCHING")
+                cached_card_image = None
+                bet_scanned_this_round = False
+                send_preview_now = True  # フロントの古いカード画像を即時クリアするため即時送信
+                ocr_debug_list.clear()
+                log_file_name = None
+                capturer.reset()
+                print(f"[INFO] クールダウン終了 → PREPARING")
                 if once:
                     break
                 continue
 
             # ════════════════════════════════════════════════
-            # WATCHING: スクリーンショットを取得して解析
+            # PREPARING / BETTING / RESULT: スクリーンショットを取得して解析
             # ════════════════════════════════════════════════
             img = take_screenshot(device)
             if img is None:
@@ -691,39 +1143,157 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     break
                 continue
 
-            # ── オープンカードを随時更新 ──────────────────────
-            card = detect_open_card(img, cap["open_card_crop"], cap["scale"], debug=debug)
-            if card:
-                if latest_open_card is None:
+            # ── カード裏面（緑）の判定と解析 ──
+            is_green = is_card_back_green(img, cap["open_card_crop"])
+
+            card = None
+            # BETTING 状態でカードが既に確定している場合は OCR スキップ（高速化）
+            need_card_ocr = not is_green and (state == State.PREPARING or latest_open_card is None)
+            if need_card_ocr:
+                card = detect_open_card(
+                    img,
+                    cap.get("open_card_crop"),
+                    cap.get("open_card_rank_crop"),
+                    cap.get("open_card_suit_crop"),
+                    cap.get("scale", 4),
+                    debug=debug,
+                    debug_logs=ocr_debug_list,
+                )
+
+            # ── 結果検出 ──
+            # BETTING 開始から result_check_delay 秒未満はカード演出中の誤検出を防ぐ
+            elapsed_in_betting = now - watching_start if state == State.BETTING else 999.0
+            if elapsed_in_betting < result_check_delay:
+                result = None
+                if debug:
+                    print(f"[DEBUG] 結果チェックスキップ ({elapsed_in_betting:.1f}s < {result_check_delay}s)")
+            else:
+                result = detect_result(img, cap["result_crop"], debug=debug)
+
+            # ── ステート遷移ロジック ──
+            if state == State.PREPARING:
+                if is_green:
+                    # 緑（裏面）なので準備中を維持
+                    pass
+                else:
+                    # 緑ではなくなった（カードオープン検知！）
+                    state = State.BETTING
                     open_detected_at = datetime.now(UTC).isoformat()
-                    print(f"[INFO] オープンカード初回検出: {card}  at={open_detected_at}")
-                elif card != latest_open_card:
-                    print(f"[INFO] オープンカード更新: {latest_open_card} → {card}")
-                latest_open_card = card
+                    print(f"[INFO] カードオープン検知 (PREPARING → BETTING)  at={open_detected_at}")
+                    watching_start = time.time()  # タイムアウト計測開始
+                    
+                    # OCRの成否に関わらず、開いた瞬間の画像をキャッシュする
+                    y0, y1, x0, x1 = cap["open_card_crop"]
+                    region = img[y0:y1, x0:x1]
+                    if region.size > 0:
+                        large_reg = cv2.resize(region, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
+                        cached_card_image = enhance_card_image(large_reg)
+                    send_preview_now = True  # カードオープン直後は即時プレビュー送信
 
-            # ── 結果検出（軽い輝度判定を先に実行）────────────────
-            result = detect_result(img, cap["result_crop"], debug=debug)
+                    if card:
+                        latest_open_card = card
+                        print(f"[INFO] オープンカード初回検出: {card}")
 
-            # ベット額: 3秒ごと更新（結果表示中も継続してキャッシュを維持）
-            if "bet_crops" in cap:
-                if time.time() - bet_last_updated >= BET_OCR_INTERVAL:
+            elif state == State.BETTING:
+                if card:
+                    if latest_open_card is None:
+                        open_detected_at = datetime.now(UTC).isoformat()
+                        print(f"[INFO] オープンカード初回検出: {card}  at={open_detected_at}")
+                        y0, y1, x0, x1 = cap["open_card_crop"]
+                        region = img[y0:y1, x0:x1]
+                        if region.size > 0:
+                            large_reg = cv2.resize(region, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
+                            cached_card_image = enhance_card_image(large_reg)
+                    elif card != latest_open_card:
+                        print(f"[INFO] オープンカード更新: {latest_open_card} → {card}")
+                        y0, y1, x0, x1 = cap["open_card_crop"]
+                        region = img[y0:y1, x0:x1]
+                        if region.size > 0:
+                            large_reg = cv2.resize(region, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
+                            cached_card_image = enhance_card_image(large_reg)
+                    latest_open_card = card
+
+                if result is not None:
+                    state = State.RESULT
+                    result_detected_at = datetime.now(UTC).isoformat()
+                    print(f"[INFO] 結果表示を検出 (BETTING → RESULT): result={result}  at={result_detected_at}")
+                    result_streak = 1
+                    last_streak_result = result
+                    send_preview_now = True  # 結果検出直後は即時プレビュー送信
+
+            elif state == State.RESULT:
+                if result is None:
+                    # 結果が消失（前フレームの誤認識など）
+                    print("[WARN] 結果表示が消失しました。BETTING に戻ります。")
+                    state = State.BETTING
+                    result_streak = 0
+                    last_streak_result = None
+                else:
+                    if result == last_streak_result:
+                        result_streak += 1
+                    else:
+                        result_streak = 1
+                        last_streak_result = result
+                    print(f"[INFO] 結果検出中 ({result_streak}/{result_stable_count}): result={result}")
+
+            # ベット額: カードオープン（BETTING遷移）から12秒経過した瞬間に1回だけスキャン
+            if state == State.BETTING and "bet_crops" in cap:
+                elapsed_since_open = now - watching_start
+                if elapsed_since_open >= 12.0 and not bet_scanned_this_round:
                     new_bets = detect_all_bets(img, cap["bet_crops"], debug=debug)
                     for k, v in new_bets.items():
                         if v is not None:
                             cached_bets[k] = v
-                    bet_last_updated = time.time()
+                    bet_scanned_this_round = True
 
             # ── 結果未検出中のみ実行（EasyOCR 系・アニメーション競合回避）────
-            if result is None:
+            if state != State.RESULT:
                 # ラウンド番号: 継続取得してキャッシュ（結果画面では非表示の場合がある）
                 if "round_crop" in cap:
                     rn = detect_round_number(img, cap["round_crop"], debug=debug)
-                    if rn is not None and rn != latest_round_number:
-                        print(f"[INFO] ラウンド番号更新: {latest_round_number} → {rn}")
-                        latest_round_number = rn
+                    if rn is not None:
+                        # 2回連続で同一の番号が取得できたら確定値として扱う（OCRの一時的な読み違い・揺れ対策）
+                        if rn == last_read_rn:
+                            rn_streak += 1
+                        else:
+                            last_read_rn = rn
+                            rn_streak = 1
 
-            # プレビューを API に送信（UI 確認用）
-            thumb = cv2.resize(img, (img.shape[1] // 3, img.shape[0] // 3))
+                        if rn_streak >= 2:
+                            # 前回確定したラウンド番号と比較し、矛盾（減少または+3を超える急増）があれば自動補正
+                            if last_confirmed_round is not None and (time.time() - last_confirmed_time < 60):
+                                if rn <= last_confirmed_round or rn > last_confirmed_round + 3:
+                                    corrected_rn = last_confirmed_round + 1
+                                    print(f"[WARN] ラウンド番号の誤検知を判定 (OCR: {rn}, 前回確定: {last_confirmed_round})。{corrected_rn} に補正します。")
+                                    rn = corrected_rn
+
+                            if rn != latest_round_number:
+                                print(f"[INFO] ラウンド番号更新 (確定): {latest_round_number} → {rn}")
+                                
+                                # BETTING 中にラウンド番号が次の番号に変わってしまった場合
+                                # = 前のラウンドの結果画面判定を見落としたまま、新しいラウンドが始まったことを意味する
+                                if state == State.BETTING and latest_round_number is not None:
+                                    print(
+                                        f"[WARN] 結果を検出できないままラウンド番号が更新されました ({latest_round_number} → {rn})。 "
+                                        "前ラウンドをタイムアウト（未確定）としてログ保存し、新ラウンドを開始します。"
+                                    )
+                                    save_round_log(capturer, latest_round_number)
+                                    
+                                    # 新しいラウンドのカード検出に備えて、オープンカード状態などをリセット
+                                    latest_open_card = None
+                                    cached_bets = {k: None for k in ALL_BET_KEYS}
+                                    bet_scanned_this_round = False
+                                    result_streak = 0
+                                    last_streak_result = None
+                                    ocr_debug_list.clear()
+                                    log_file_name = None
+                                    capturer.reset()
+
+                                latest_round_number = rn
+                                # 新ラウンド検出されたのでタイムアウト計測の基準時刻をリセット
+                                if state == State.BETTING:
+                                    print("[INFO] ラウンド番号変化を検知 → watching_start をリセット")
+                                    watching_start = time.time()
 
             # 結果領域の3分割輝度スコア
             result_scores: dict[str, float] = {}
@@ -761,47 +1331,63 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                 if val is not None:
                     cached_jackpot_stock = val
 
-            preview_payload = {
-                "open_detected_at": open_detected_at,
-                "result_detected_at": result_detected_at,
-                "result": result,
-                "open_card": latest_open_card,
-                "round_number": latest_round_number,
-                "cowboy_hand": None,
-                "bull_hand": None,
-                "screen_image": encode_jpeg(thumb),
-                # 検出値
-                "bet_values":    {k: v for k, v in cached_bets.items()},
-                "win_scores":    win_scores,
-                "result_scores": result_scores,
-                "winning_hand_scores": winning_hand_scores,
-                "jackpot_stock": cached_jackpot_stock,
-                # 全クロップ領域画像（座標チューニング確認用）
-                "round_image":         encode_crop(img, cap["round_crop"]) if "round_crop" in cap else None,
-                "open_card_image":     encode_crop(img, cap["open_card_crop"]),
-                "result_image":        encode_crop(img, cap["result_crop"]) if "result_crop" in cap else None,
-                "jackpot_stock_image": encode_crop(img, cap["jackpot_stock_crop"]) if "jackpot_stock_crop" in cap else None,
-                "bet_images":          {k: encode_crop(img, v) for k, v in cap.get("bet_crops", {}).items()},
-                "win_images":          {k: encode_crop(img, v) for k, v in cap.get("win_regions", {}).items()},
-                "winning_hand_images": [encode_crop(img, row) for row in cap.get("winning_hand_rows", [])],
-            }
-            try:
-                post_capture_preview(client, base_url, token, preview_payload)
-            except (httpx.RequestError, httpx.HTTPStatusError) as e:
-                print(f"[WARN] プレビュー送信失敗: {e}", file=sys.stderr)
+            # ── プレビュー送信（間引き: 3秒ごと、またはカードオープン直後）──
+            now_preview = time.time()
+            if send_preview_now or (now_preview - preview_last_sent >= PREVIEW_INTERVAL):
+                send_preview_now = False
+                thumb = cv2.resize(img, (img.shape[1] // 3, img.shape[0] // 3))
+                preview_payload = {
+                    "state": state.value,
+                    "open_detected_at": open_detected_at,
+                    "result_detected_at": result_detected_at,
+                    "result": result if state == State.RESULT else None,
+                    "open_card": latest_open_card,
+                    "round_number": latest_round_number,
+                    "cowboy_hand": None,
+                    "bull_hand": None,
+                    "screen_image": encode_jpeg(thumb),
+                    # 検出値
+                    "bet_values":    {k: v for k, v in cached_bets.items()},
+                    "win_scores":    win_scores,
+                    "result_scores": result_scores,
+                    "winning_hand_scores": winning_hand_scores,
+                    "jackpot_stock": cached_jackpot_stock,
+                    # 全クロップ領域画像（座標チューニング確認用）
+                    "round_image":         encode_crop(img, cap["round_crop"]) if "round_crop" in cap else None,
+                    "open_card_image":     encode_jpeg(cached_card_image) if (cached_card_image is not None) else encode_crop(img, cap["open_card_crop"]),
+                    "result_image":        encode_crop(img, cap["result_crop"]) if "result_crop" in cap else None,
+                    "jackpot_stock_image": encode_crop(img, cap["jackpot_stock_crop"]) if "jackpot_stock_crop" in cap else None,
+                    "bet_images":          {k: encode_crop(img, v) for k, v in cap.get("bet_crops", {}).items()},
+                    "win_images":          {k: encode_crop(img, v) for k, v in cap.get("win_regions", {}).items()},
+                    "winning_hand_images": [encode_crop(img, row) for row in cap.get("winning_hand_rows", [])],
+                }
+                try:
+                    post_capture_preview(client, base_url, token, preview_payload)
+                    preview_last_sent = now_preview
+                except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                    print(f"[WARN] プレビュー送信失敗: {e}", file=sys.stderr)
 
-            if result is None:
-                # まだ結果表示されていない（カウントダウン中）
-                result_streak = 0
-                last_streak_result = None
-
-                # タイムアウトチェック
-                if now - watching_start > result_timeout:
+            # ── 結果確定チェック ──
+            if state != State.RESULT or result_streak < result_stable_count:
+                # まだ確定ではない: タイムアウトのチェック
+                if state != State.PREPARING and (now - watching_start > result_timeout):
                     print(
                         f"[WARN] 結果検出タイムアウト ({result_timeout}s)。"
-                        "クロップ座標を確認してください。WATCHING をリセットします。"
+                        "準備中に戻ります。"
                     )
+                    # カードもラウンド番号も一切検出できなかった場合は、無効な画面（または配信停止など）とみなしてログ保存をスキップ
+                    if latest_round_number is not None or latest_open_card is not None:
+                        save_round_log(capturer, latest_round_number)
+                    else:
+                        print("[INFO] カードおよびラウンド番号が未検出のため、空ログの保存をスキップします。")
+                    
+                    state = State.PREPARING
                     watching_start = time.time()
+                    result_streak = 0
+                    last_streak_result = None
+                    ocr_debug_list.clear()
+                    log_file_name = None
+                    capturer.reset()
 
                 time.sleep(poll_fast)
                 if once:
@@ -843,15 +1429,29 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
 
             # ラウンド番号確定（最終スキャン後）
             round_number = latest_round_number
+            if round_number is not None:
+                last_confirmed_round = round_number
+                last_confirmed_time = time.time()
 
             # 最終ベット額（キャッシュ優先、WIN時はキャッシュが最も正確）
             # WIN アニメーション後に直接読むと火炎などでラベルが隠れる場合がある
             bets = cached_bets.copy()
 
+            # ラウンドログを保存
+            log_file_name = save_round_log(capturer, round_number)
+
             print(
                 f"[INFO] 結果確定 → POST: result={result}  open_card={latest_open_card}  "
-                f"round={round_number}  bets={bets}  sub_wins={sub_wins}"
+                f"round={round_number}  bets={bets}  sub_wins={sub_wins}  log_file={log_file_name}"
             )
+            # オープンカード画像を base64 で POST ペイロードに含める
+            card_image_b64 = None
+            if cached_card_image is not None:
+                large = cv2.resize(cached_card_image, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
+                card_image_b64 = encode_jpeg(large, quality=85)
+            elif latest_open_card:
+                card_image_b64 = encode_crop(img, cap["open_card_crop"], scale=4)
+
             payload = {
                 "open_card": latest_open_card,
                 "result": result,
@@ -878,13 +1478,23 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                 "win_sf":        sub_wins.get("win_sf"),
                 "win_fh":        sub_wins.get("win_fh"),
                 "win_four":      sub_wins.get("win_four"),
+                "card_image":    card_image_b64,
+                "ocr_debug":     "\n".join(ocr_debug_list) if ocr_debug_list else None,
+                "log_file_name": log_file_name,
             }
             try:
                 resp = post_game(client, base_url, token, payload)
                 if resp.get("skipped"):
                     print(f"[INFO] 重複スキップ: {resp.get('reason')}")
                 else:
-                    print(f"[INFO] POST 成功: id={resp.get('id')}  result={resp.get('result')}")
+                    game_id = resp.get("id")
+                    print(f"[INFO] POST 成功: id={game_id}  result={resp.get('result')}")
+                    # カード画像をファイルにも保存（カバレッジテスト用）
+                    if game_id and latest_open_card:
+                        if cached_card_image is not None:
+                            _save_card_shot(game_id, latest_open_card, cached_card_image)
+                        else:
+                            _save_card_shot(game_id, latest_open_card, img, cap["open_card_crop"])
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 401:
                     print("[WARN] トークン期限切れ。再ログインして再送します", file=sys.stderr)
@@ -892,7 +1502,13 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                         token = login(client, base_url, username, password)
                         token_refreshed_at = time.time()
                         resp = post_game(client, base_url, token, payload)
-                        print(f"[INFO] 再送 POST 成功: id={resp.get('id')}")
+                        game_id = resp.get("id")
+                        print(f"[INFO] 再送 POST 成功: id={game_id}")
+                        if game_id and latest_open_card:
+                            if cached_card_image is not None:
+                                _save_card_shot(game_id, latest_open_card, cached_card_image)
+                            else:
+                                _save_card_shot(game_id, latest_open_card, img, cap["open_card_crop"])
                     except (httpx.RequestError, httpx.HTTPStatusError) as relogin_error:
                         print(f"[ERROR] 再ログイン後 POST 失敗: {relogin_error}", file=sys.stderr)
                 else:
@@ -912,6 +1528,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
             latest_round_number = None
             open_detected_at = None
             result_detected_at = None
+            cached_card_image = None
             print(f"[INFO] → COOLDOWN ({post_round_cooldown}s)")
 
             if once:

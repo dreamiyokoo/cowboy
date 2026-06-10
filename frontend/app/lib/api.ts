@@ -19,7 +19,7 @@ export interface CapturePreview {
   winning_hand_scores?: number[] | null;
   jackpot_stock?: number | null;
   jackpot_stock_image?: string | null;
-  game_state?: "result" | "betting" | "unknown";
+  game_state?: "result" | "betting" | "preparing" | "cooldown" | "unknown";
   remaining_seconds?: number | null;
 }
 
@@ -61,6 +61,10 @@ export interface Game {
   win_four: boolean | null;
   // 合計
   total_bet: number | null;
+  // オープンカード画像（base64 JPEG data URL）
+  card_image?: string | null;
+  ocr_debug?: string | null;
+  log_file_name?: string | null;
 }
 
 export interface GamesResponse {
@@ -79,6 +83,30 @@ export interface StatsResponse {
   total_bet_sum: number;
   total_payout: number;
   user_pnl: number;
+}
+
+export interface CardStatsRates {
+  cowboy: number;
+  draw: number;
+  bull: number;
+  any_flash: number;
+  any_pair: number;
+  any_ace: number;
+  win_high: number;
+  win_two: number;
+  win_sf: number;
+  win_fh: number;
+  win_four: number;
+}
+
+export interface CardStatsItem {
+  card: string;
+  total: number;
+  rates: CardStatsRates;
+}
+
+export interface CardStatsResponse {
+  card_stats: CardStatsItem[];
 }
 
 // ── API クライアント ───────────────────────────────────
@@ -123,6 +151,24 @@ export async function fetchGames(
 export async function fetchCapturePreview(token: string): Promise<CapturePreview | null> {
   try {
     return await apiFetch<CapturePreview>("/api/v1/capture/preview", token);
+  } catch (e: unknown) {
+    if (e instanceof Error && "status" in e && (e as { status: number }).status === 404) {
+      return null;
+    }
+    throw e;
+  }
+}
+
+export async function fetchCardStats(token: string): Promise<CardStatsResponse> {
+  return apiFetch<CardStatsResponse>("/api/v1/games/card-stats", token);
+}
+
+export async function fetchCardStatSingle(
+  token: string,
+  card: string
+): Promise<CardStatsItem | null> {
+  try {
+    return await apiFetch<CardStatsItem>(`/api/v1/games/card-stats/${encodeURIComponent(card)}`, token);
   } catch (e: unknown) {
     if (e instanceof Error && "status" in e && (e as { status: number }).status === 404) {
       return null;

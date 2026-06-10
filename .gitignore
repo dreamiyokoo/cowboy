@@ -1,4 +1,17 @@
+# Environment variables
 .env
+
+# Logs and debug output
+logs/
+*.log
+
+# Debug and temporary images
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -6,3 +19,14 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# IDEs and OS
+.DS_Store
+.idea/
+.vscode/
+.claude/

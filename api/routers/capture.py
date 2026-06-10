@@ -16,6 +16,7 @@ PREVIEW_TTL_SECONDS = 60 * 10
 
 
 class CapturePreviewPayload(BaseModel):
+    state: str | None = None               # ゲームの状態（preparing, betting, result, cooldown）
     open_detected_at: str | None = None    # オープンカード検出時刻
     result_detected_at: str | None = None  # 結果検出時刻
     result: str | None = None         # cowboy / draw / bull
@@ -71,16 +72,21 @@ async def get_capture_preview(
 
     data = json.loads(payload)
 
-    # ゲーム状態を推定:
-    #   WIN（result）がどこかに出ていれば「結果表示」、無ければ「投票中」
+    # ゲーム状態を決定:
+    #   キャプチャから明示的な state が送られている場合はそれを最優先で採用
+    #   送られていない場合は従来通り result の有無で推定
     remaining_seconds: float | None = None
 
-    if data.get("result"):
+    if data.get("state"):
+        state = data["state"]
+    elif data.get("result"):
         # 結果（WINバッジ）が検出されている → 結果表示状態
         state = "result"
     else:
         # WIN がどこにも無い → 投票中
         state = "betting"
+
+    if state == "betting":
         if data.get("open_detected_at"):
             # オープン検出からの経過時間で残り秒数を推定
             open_time = datetime.fromisoformat(data["open_detected_at"])
@@ -89,6 +95,13 @@ async def get_capture_preview(
             # 推定: オープン表示 10秒 + カウントダウン 15秒 = 25秒 で結果
             GAME_TOTAL_SECONDS = 25
             remaining_seconds = max(0, GAME_TOTAL_SECONDS - elapsed)
+    elif state == "cooldown":
+        if data.get("result_detected_at"):
+            result_time = datetime.fromisoformat(data["result_detected_at"])
+            now = datetime.now(UTC)
+            elapsed = (now - result_time).total_seconds()
+            COOLDOWN_TOTAL_SECONDS = 18
+            remaining_seconds = max(0, COOLDOWN_TOTAL_SECONDS - elapsed)
 
     data["game_state"] = state
     data["remaining_seconds"] = remaining_seconds

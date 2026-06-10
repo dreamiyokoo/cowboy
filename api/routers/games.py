@@ -1,7 +1,9 @@
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, status, HTTPException
+from fastapi.responses import FileResponse
+from pathlib import Path
 from pydantic import BaseModel, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +16,7 @@ router = APIRouter(prefix="/api/v1/games", tags=["games"])
 VALID_RESULTS = {"cowboy", "draw", "bull"}
 VALID_HAND_TYPES = {1, 2, 3}
 DUPLICATE_GUARD_SECONDS = 60
-MAX_LIMIT = 200
+MAX_LIMIT = 1000
 
 
 class GamePostRequest(BaseModel):
@@ -54,6 +56,15 @@ class GamePostRequest(BaseModel):
     win_sf:    bool | None = None
     win_fh:    bool | None = None
     win_four:  bool | None = None
+
+    # オープンカードのクロップ画像（base64 JPEG, data URL形式）
+    card_image: str | None = None
+
+    # OCRデバッグ情報（Tesseract/Shape Matchなどのテキスト）
+    ocr_debug: str | None = None
+
+    # ラウンドログのファイル名
+    log_file_name: str | None = None
 
     @field_validator("cowboy_hand", "bull_hand")
     @classmethod
@@ -107,6 +118,9 @@ def _row_to_dict(row) -> dict:
     ]
     non_null = [b for b in all_bets if b is not None]
     d["total_bet"] = sum(non_null) if non_null else None
+    d["card_image"] = row.card_image
+    d["ocr_debug"] = row.ocr_debug
+    d["log_file_name"] = row.log_file_name
     return d
 
 
@@ -136,14 +150,16 @@ async def post_game(
             "  bet_any_flash, bet_any_pair, bet_any_ace,"
             "  bet_win_high, bet_win_two, bet_win_sf, bet_win_fh, bet_win_four,"
             "  win_any_flash, win_any_pair, win_any_ace,"
-            "  win_high, win_two, win_sf, win_fh, win_four"
+            "  win_high, win_two, win_sf, win_fh, win_four,"
+            "  card_image, ocr_debug, log_file_name"
             ") VALUES ("
             "  :open_card, :result, :cowboy_hand, :bull_hand, :round_number, :jackpot_stock,"
             "  :bet_cowboy, :bet_draw, :bet_bull,"
             "  :bet_any_flash, :bet_any_pair, :bet_any_ace,"
             "  :bet_win_high, :bet_win_two, :bet_win_sf, :bet_win_fh, :bet_win_four,"
             "  :win_any_flash, :win_any_pair, :win_any_ace,"
-            "  :win_high, :win_two, :win_sf, :win_fh, :win_four"
+            "  :win_high, :win_two, :win_sf, :win_fh, :win_four,"
+            "  :card_image, :ocr_debug, :log_file_name"
             ") RETURNING "
             "  id, open_card, result, cowboy_hand, bull_hand, round_number, recorded_at,"
             "  jackpot_stock,"
@@ -151,7 +167,8 @@ async def post_game(
             "  bet_any_flash, bet_any_pair, bet_any_ace,"
             "  bet_win_high, bet_win_two, bet_win_sf, bet_win_fh, bet_win_four,"
             "  win_any_flash, win_any_pair, win_any_ace,"
-            "  win_high, win_two, win_sf, win_fh, win_four"
+            "  win_high, win_two, win_sf, win_fh, win_four,"
+            "  card_image, ocr_debug, log_file_name"
         ),
         {
             "open_card": body.open_card, "result": body.result,
@@ -164,6 +181,7 @@ async def post_game(
             "win_any_flash": body.win_any_flash, "win_any_pair": body.win_any_pair, "win_any_ace": body.win_any_ace,
             "win_high": body.win_high, "win_two": body.win_two, "win_sf": body.win_sf,
             "win_fh": body.win_fh, "win_four": body.win_four,
+            "card_image": body.card_image, "ocr_debug": body.ocr_debug, "log_file_name": body.log_file_name,
         },
     )
     row = inserted.fetchone()
@@ -186,7 +204,8 @@ async def get_games(
             "       bet_any_flash, bet_any_pair, bet_any_ace,"
             "       bet_win_high, bet_win_two, bet_win_sf, bet_win_fh, bet_win_four,"
             "       win_any_flash, win_any_pair, win_any_ace,"
-            "       win_high, win_two, win_sf, win_fh, win_four "
+            "       win_high, win_two, win_sf, win_fh, win_four,"
+            "       card_image, ocr_debug, log_file_name "
             "FROM games ORDER BY recorded_at DESC, id DESC "
             "LIMIT :limit OFFSET :offset"
         ),
@@ -270,3 +289,120 @@ async def get_stats(
         "total_payout": total_payout,
         "user_pnl": total_payout - total_bet_sum,
     }
+
+
+@router.get("/card-stats")
+async def get_card_stats(
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(get_current_user),
+):
+    """カード別のWIN確率・統計データを集計して返す"""
+    query = text("""
+        SELECT
+            open_card,
+            COUNT(*) AS total_count,
+            COUNT(CASE WHEN result = 'cowboy' THEN 1 END) AS count_cowboy,
+            COUNT(CASE WHEN result = 'draw' THEN 1 END) AS count_draw,
+            COUNT(CASE WHEN result = 'bull' THEN 1 END) AS count_bull,
+            COUNT(CASE WHEN win_any_flash = TRUE THEN 1 END) AS count_any_flash,
+            COUNT(CASE WHEN win_any_pair = TRUE THEN 1 END) AS count_any_pair,
+            COUNT(CASE WHEN win_any_ace = TRUE THEN 1 END) AS count_any_ace,
+            COUNT(CASE WHEN win_high = TRUE THEN 1 END) AS count_win_high,
+            COUNT(CASE WHEN win_two = TRUE THEN 1 END) AS count_win_two,
+            COUNT(CASE WHEN win_sf = TRUE THEN 1 END) AS count_win_sf,
+            COUNT(CASE WHEN win_fh = TRUE THEN 1 END) AS count_win_fh,
+            COUNT(CASE WHEN win_four = TRUE THEN 1 END) AS count_win_four
+        FROM games
+        WHERE open_card IS NOT NULL AND open_card != ''
+        GROUP BY open_card
+        ORDER BY open_card ASC
+    """)
+    rows = await db.execute(query)
+    
+    stats_list = []
+    for r in rows:
+        total = r.total_count
+        if total == 0:
+            continue
+        stats_list.append({
+            "card": r.open_card,
+            "total": total,
+            "rates": {
+                "cowboy": round(r.count_cowboy / total, 4),
+                "draw": round(r.count_draw / total, 4),
+                "bull": round(r.count_bull / total, 4),
+                "any_flash": round(r.count_any_flash / total, 4),
+                "any_pair": round(r.count_any_pair / total, 4),
+                "any_ace": round(r.count_any_ace / total, 4),
+                "win_high": round(r.count_win_high / total, 4),
+                "win_two": round(r.count_win_two / total, 4),
+                "win_sf": round(r.count_win_sf / total, 4),
+                "win_fh": round(r.count_win_fh / total, 4),
+                "win_four": round(r.count_win_four / total, 4),
+            }
+        })
+    return {"card_stats": stats_list}
+
+
+@router.get("/card-stats/{card}")
+async def get_card_stat_single(
+    card: str,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(get_current_user),
+):
+    """指定カード1枚の WIN 確率統計を返す（ライブキャプチャ用）"""
+    query = text("""
+        SELECT
+            COUNT(*) AS total_count,
+            COUNT(CASE WHEN result = 'cowboy' THEN 1 END) AS count_cowboy,
+            COUNT(CASE WHEN result = 'draw' THEN 1 END) AS count_draw,
+            COUNT(CASE WHEN result = 'bull' THEN 1 END) AS count_bull,
+            COUNT(CASE WHEN win_any_flash = TRUE THEN 1 END) AS count_any_flash,
+            COUNT(CASE WHEN win_any_pair = TRUE THEN 1 END) AS count_any_pair,
+            COUNT(CASE WHEN win_any_ace = TRUE THEN 1 END) AS count_any_ace,
+            COUNT(CASE WHEN win_high = TRUE THEN 1 END) AS count_win_high,
+            COUNT(CASE WHEN win_two = TRUE THEN 1 END) AS count_win_two,
+            COUNT(CASE WHEN win_sf = TRUE THEN 1 END) AS count_win_sf,
+            COUNT(CASE WHEN win_fh = TRUE THEN 1 END) AS count_win_fh,
+            COUNT(CASE WHEN win_four = TRUE THEN 1 END) AS count_win_four
+        FROM games
+        WHERE open_card = :card
+    """)
+    row = (await db.execute(query, {"card": card})).fetchone()
+    if row is None or row.total_count == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No data for this card")
+    total = row.total_count
+    return {
+        "card": card,
+        "total": total,
+        "rates": {
+            "cowboy":    round(row.count_cowboy / total, 4),
+            "draw":      round(row.count_draw / total, 4),
+            "bull":      round(row.count_bull / total, 4),
+            "any_flash": round(row.count_any_flash / total, 4),
+            "any_pair":  round(row.count_any_pair / total, 4),
+            "any_ace":   round(row.count_any_ace / total, 4),
+            "win_high":  round(row.count_win_high / total, 4),
+            "win_two":   round(row.count_win_two / total, 4),
+            "win_sf":    round(row.count_win_sf / total, 4),
+            "win_fh":    round(row.count_win_fh / total, 4),
+            "win_four":  round(row.count_win_four / total, 4),
+        }
+    }
+
+
+@router.get("/logs/{filename}")
+async def get_round_log(
+    filename: str,
+    _: dict = Depends(get_current_user),
+):
+    """特定のラウンドログファイルの内容を配信する"""
+    # ディレクトリトラバーサル防止
+    safe_name = Path(filename).name
+    log_path = Path("/app/logs") / safe_name
+    if not log_path.exists() or not log_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Log file not found"
+        )
+    return FileResponse(log_path, media_type="text/plain")

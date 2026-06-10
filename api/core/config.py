@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     JWT_SECRET: str
     JWT_EXPIRE_MINUTES: int = 1440
     REDIS_URL: str = "redis://localhost:6379"
+    ADMIN_PASSWORD: str = "admin123"
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
