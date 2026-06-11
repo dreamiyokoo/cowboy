@@ -1,0 +1,12 @@
+.git
+.idea
+logs/
+node_modules/
+frontend/node_modules/
+frontend/.next/
+*.png
+*.jpg
+*.jpeg
+capture/card_shots/
+capture/logs/
+**/__pycache__/

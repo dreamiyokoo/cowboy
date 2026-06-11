@@ -259,6 +259,36 @@ def _save_card_shot(game_id: int, card: str, img: np.ndarray, crop: list[int] | 
         print(f"[WARN] card_shot 保存失敗: {e}", file=sys.stderr)
 
 
+_RESULT_CAPTURES_DIR = Path("/app/logs/result_captures")
+_RESULT_CAPTURES_MAX = 100
+
+
+def _save_result_capture(game_id: int, img: np.ndarray) -> None:
+    """
+    結果表示のスクリーンショットを /app/logs/result_captures/{id}.jpg に保存する。
+    最新 _RESULT_CAPTURES_MAX 件を超えた分は古い順に削除してローテーションする。
+    """
+    try:
+        _RESULT_CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
+        if img.size == 0:
+            return
+        # 1/2サイズに縮小してJPEG保存
+        h, w = img.shape[:2]
+        small = cv2.resize(img, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
+        filename = _RESULT_CAPTURES_DIR / f"{game_id}.jpg"
+        cv2.imwrite(str(filename), small, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        print(f"[INFO] result_capture 保存成功: {filename}")
+
+        # ローテーション: 古いファイルを削除
+        captures = sorted(_RESULT_CAPTURES_DIR.glob("*.jpg"), key=lambda p: p.stat().st_mtime)
+        while len(captures) > _RESULT_CAPTURES_MAX:
+            captures[0].unlink(missing_ok=True)
+            captures = captures[1:]
+    except Exception as e:
+        print(f"[WARN] result_capture 保存失敗: {e}", file=sys.stderr)
+
+
+
 # ────────────────────────────────────────────────
 # 結果判定（カウボーイ / 抽選 / ブル）
 # ────────────────────────────────────────────────
@@ -294,17 +324,17 @@ def detect_result(img: np.ndarray, crop: list[int], debug: bool = False) -> str 
     scores: dict[str, float] = {}
     for name, sec in sections.items():
         hsv = cv2.cvtColor(sec, cv2.COLOR_BGR2HSV)
-        # V > 220 の非常に明るいピクセルの比率
-        bright = float(np.count_nonzero(hsv[:, :, 2] > 220)) / (sec.shape[0] * sec.shape[1])
+        # V > 220 (非常に明るい) かつ S > 70 (白色文字や無色チップを除外するため鮮やか) なピクセルの比率
+        mask = (hsv[:, :, 2] > 220) & (hsv[:, :, 1] > 70)
+        bright = float(np.count_nonzero(mask)) / (sec.shape[0] * sec.shape[1])
         scores[name] = bright
 
     if debug:
-        print(f"[DEBUG] result brightness: {scores}")
+        print(f"[DEBUG] result brightness (saturated): {scores}")
         cv2.imwrite("/tmp/cowboy_result_region.png", region)
 
-    # WIN バッジが表示されているセクションは 0.30 以上になる
-    # カウントダウン中はすべてのセクションが低い値
-    BRIGHT_THRESHOLD = 0.30
+    # 鮮やかな WIN バッジが表示されているセクションは 0.20 以上になる
+    BRIGHT_THRESHOLD = 0.20
     max_score = max(scores.values())
 
     if max_score < BRIGHT_THRESHOLD:
@@ -834,6 +864,51 @@ def detect_round_number(img: np.ndarray, crop: list[int], debug: bool = False) -
     return None
 
 
+def detect_timer(img: np.ndarray, crop: list[int], debug: bool = False) -> int | None:
+    """
+    タイマー（カウントダウン残り秒数）を読み取る。
+    1. HSV V/S チャンネル閾値などで二値化してTesseract
+    2. EasyOCR
+    """
+    y0, y1, x0, x1 = crop
+    region = img[y0:y1, x0:x1]
+    if region.size == 0:
+        return None
+
+    if debug:
+        cv2.imwrite("/tmp/cowboy_timer_region.png", region)
+
+    # 前処理: 高解像度化とグレースケール変換
+    large = cv2.resize(region, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
+    gray = cv2.cvtColor(large, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
+    inv = cv2.bitwise_not(thresh)
+    if debug:
+        cv2.imwrite("/tmp/cowboy_timer_inv.png", inv)
+
+    tess_base = "--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789"
+    for psm in [7, 8, 13]:
+        text = pytesseract.image_to_string(inv, config=tess_base.format(psm=psm)).strip()
+        if debug:
+            print(f"[DEBUG] timer Tess(inv) psm={psm}: {repr(text)}")
+        nums = [n for n in re.findall(r"\d+", text) if 0 <= int(n) <= 15]
+        if nums:
+            return int(nums[0])
+
+    # フォールバック: EasyOCR
+    reader = _get_ocr_reader()
+    if reader is not None:
+        results = reader.readtext(large, detail=0)
+        full_text = "".join(results)
+        if debug:
+            print(f"[DEBUG] timer EasyOCR: {repr(full_text)}")
+        nums = [n for n in re.findall(r"\d+", full_text) if 0 <= int(n) <= 15]
+        if nums:
+            return int(nums[0])
+
+    return None
+
+
 # ────────────────────────────────────────────────
 # 全11ポジション ベット額検出
 # ────────────────────────────────────────────────
@@ -1019,7 +1094,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
     sys.stdout = capturer
     atexit.register(lambda: setattr(sys, "stdout", capturer.original_stdout))
 
-    # 起動時に既存の error_*.log をクリーンアップ
+    # 起動時に既存 of error_*.log をクリーンアップ
     log_dir = Path("/app/logs")
     if log_dir.exists():
         for f in log_dir.glob("error_*.log"):
@@ -1067,9 +1142,13 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
         cached_jackpot_stock: int | None = None  # ジャックポットストックコイン
         cached_card_image: np.ndarray | None = None  # 初回/更新時に切り出したオープンカード画像
         bet_scanned_this_round = False
+        round_number_scanned_this_round = False
         preview_last_sent   = 0.0           # プレビュー最終送信時刻
         PREVIEW_INTERVAL    = 3.0           # プレビュー送信間隔（秒）—重いクロップ画像の間引き
         send_preview_now    = False         # 即時送信フラグ（カードオープン直後等）
+        latest_timer_value: int | None = None  # 最新のタイマー検出値
+        timer_active_last_seen = 0.0           # タイマーが有効だった最終時刻
+        timer_active_value = 0                 # タイマーが有効だった時の値
         
         ocr_debug_list: list[str] = []      # OCR詳細デバッグログ
         log_file_name: str | None = None    # ログファイル名
@@ -1123,10 +1202,13 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                 bet_last_updated = 0.0
                 cached_card_image = None
                 bet_scanned_this_round = False
+                round_number_scanned_this_round = False
                 send_preview_now = True  # フロントの古いカード画像を即時クリアするため即時送信
                 ocr_debug_list.clear()
                 log_file_name = None
                 capturer.reset()
+                timer_active_last_seen = 0.0
+                timer_active_value = 0
                 print(f"[INFO] クールダウン終了 → PREPARING")
                 if once:
                     break
@@ -1146,6 +1228,18 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
             # ── カード裏面（緑）の判定と解析 ──
             is_green = is_card_back_green(img, cap["open_card_crop"])
 
+            # ── タイマー検出 ──
+            timer_value = None
+            if "timer_crop" in cap:
+                timer_value = detect_timer(img, cap["timer_crop"], debug=debug)
+                if timer_value is not None:
+                    if timer_value != latest_timer_value:
+                        print(f"[INFO] タイマー検出: {timer_value}s")
+                    if 1 <= timer_value <= 15:
+                        timer_active_last_seen = now
+                        timer_active_value = timer_value
+                latest_timer_value = timer_value
+
             card = None
             # BETTING 状態でカードが既に確定している場合は OCR スキップ（高速化）
             need_card_ocr = not is_green and (state == State.PREPARING or latest_open_card is None)
@@ -1161,20 +1255,39 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                 )
 
             # ── 結果検出 ──
-            # BETTING 開始から result_check_delay 秒未満はカード演出中の誤検出を防ぐ
-            elapsed_in_betting = now - watching_start if state == State.BETTING else 999.0
-            if elapsed_in_betting < result_check_delay:
-                result = None
-                if debug:
-                    print(f"[DEBUG] 結果チェックスキップ ({elapsed_in_betting:.1f}s < {result_check_delay}s)")
+            can_check_result = False
+            if timer_value == 0:
+                can_check_result = True
+            elif timer_active_last_seen > 0.0:
+                countdown_end_time = timer_active_last_seen + timer_active_value
+                if now >= countdown_end_time - 0.5:
+                    can_check_result = True
+                else:
+                    if debug:
+                        print(f"[DEBUG] 結果チェックスキップ (タイマーカウントダウン中: 残り {countdown_end_time - now:.1f}s)")
             else:
+                elapsed_in_betting = now - watching_start if state == State.BETTING else 999.0
+                if elapsed_in_betting >= result_check_delay:
+                    can_check_result = True
+                else:
+                    if debug:
+                        print(f"[DEBUG] 結果チェックスキップ (経過時間不足: {elapsed_in_betting:.1f}s < {result_check_delay}s)")
+
+            if can_check_result:
                 result = detect_result(img, cap["result_crop"], debug=debug)
+            else:
+                result = None
 
             # ── ステート遷移ロジック ──
             if state == State.PREPARING:
                 if is_green:
                     # 緑（裏面）なので準備中を維持
-                    pass
+                    if timer_value is not None and 1 <= timer_value <= 15:
+                        state = State.BETTING
+                        open_detected_at = datetime.now(UTC).isoformat()
+                        print(f"[INFO] タイマー検出による強制BETTING移行 (PREPARING → BETTING) at={open_detected_at}")
+                        watching_start = time.time()
+                        send_preview_now = True
                 else:
                     # 緑ではなくなった（カードオープン検知！）
                     state = State.BETTING
@@ -1249,7 +1362,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
             # ── 結果未検出中のみ実行（EasyOCR 系・アニメーション競合回避）────
             if state != State.RESULT:
                 # ラウンド番号: 継続取得してキャッシュ（結果画面では非表示の場合がある）
-                if "round_crop" in cap:
+                if "round_crop" in cap and not round_number_scanned_this_round:
                     rn = detect_round_number(img, cap["round_crop"], debug=debug)
                     if rn is not None:
                         # 2回連続で同一の番号が取得できたら確定値として扱う（OCRの一時的な読み違い・揺れ対策）
@@ -1283,6 +1396,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                                     latest_open_card = None
                                     cached_bets = {k: None for k in ALL_BET_KEYS}
                                     bet_scanned_this_round = False
+                                    round_number_scanned_this_round = False
                                     result_streak = 0
                                     last_streak_result = None
                                     ocr_debug_list.clear()
@@ -1294,6 +1408,8 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                                 if state == State.BETTING:
                                     print("[INFO] ラウンド番号変化を検知 → watching_start をリセット")
                                     watching_start = time.time()
+                            
+                            round_number_scanned_this_round = True
 
             # 結果領域の3分割輝度スコア
             result_scores: dict[str, float] = {}
@@ -1314,7 +1430,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     hsv = cv2.cvtColor(sec, cv2.COLOR_BGR2HSV)
                     win_scores[key] = round(float(np.count_nonzero(hsv[:, :, 2] > 220)) / (sec.shape[0] * sec.shape[1]), 3)
 
-            # 勝利ハンド行の輝度スコア（各行 WIN 判定用）
+            # WIN 勝利ハンド行の輝度スコア（各行 WIN 判定用）
             winning_hand_scores: list[float] = []
             for y0w, y1w, x0w, x1w in cap.get("winning_hand_rows", []):
                 sec = img[y0w:y1w, x0w:x1w]
@@ -1352,6 +1468,8 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     "result_scores": result_scores,
                     "winning_hand_scores": winning_hand_scores,
                     "jackpot_stock": cached_jackpot_stock,
+                    "timer_value":         latest_timer_value,
+                    "timer_image":         encode_crop(img, cap["timer_crop"]) if "timer_crop" in cap else None,
                     # 全クロップ領域画像（座標チューニング確認用）
                     "round_image":         encode_crop(img, cap["round_crop"]) if "round_crop" in cap else None,
                     "open_card_image":     encode_jpeg(cached_card_image) if (cached_card_image is not None) else encode_crop(img, cap["open_card_crop"]),
@@ -1385,9 +1503,13 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     watching_start = time.time()
                     result_streak = 0
                     last_streak_result = None
+                    round_number_scanned_this_round = False
                     ocr_debug_list.clear()
                     log_file_name = None
                     capturer.reset()
+                    latest_timer_value = None
+                    timer_active_last_seen = 0.0
+                    timer_active_value = 0
 
                 time.sleep(poll_fast)
                 if once:
@@ -1489,6 +1611,8 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                 else:
                     game_id = resp.get("id")
                     print(f"[INFO] POST 成功: id={game_id}  result={resp.get('result')}")
+                    if game_id:
+                        _save_result_capture(game_id, img)
                     # カード画像をファイルにも保存（カバレッジテスト用）
                     if game_id and latest_open_card:
                         if cached_card_image is not None:
@@ -1504,6 +1628,8 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                         resp = post_game(client, base_url, token, payload)
                         game_id = resp.get("id")
                         print(f"[INFO] 再送 POST 成功: id={game_id}")
+                        if game_id:
+                            _save_result_capture(game_id, img)
                         if game_id and latest_open_card:
                             if cached_card_image is not None:
                                 _save_card_shot(game_id, latest_open_card, cached_card_image)
@@ -1529,6 +1655,9 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
             open_detected_at = None
             result_detected_at = None
             cached_card_image = None
+            latest_timer_value = None
+            timer_active_last_seen = 0.0
+            timer_active_value = 0
             print(f"[INFO] → COOLDOWN ({post_round_cooldown}s)")
 
             if once:

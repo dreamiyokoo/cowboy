@@ -19,6 +19,8 @@ export interface CapturePreview {
   winning_hand_scores?: number[] | null;
   jackpot_stock?: number | null;
   jackpot_stock_image?: string | null;
+  timer_value?: number | null;
+  timer_image?: string | null;
   game_state?: "result" | "betting" | "preparing" | "cooldown" | "unknown";
   remaining_seconds?: number | null;
 }
@@ -65,6 +67,7 @@ export interface Game {
   card_image?: string | null;
   ocr_debug?: string | null;
   log_file_name?: string | null;
+  has_capture?: boolean;
 }
 
 export interface GamesResponse {
@@ -110,6 +113,8 @@ export interface CardStatsResponse {
 }
 
 // ── API クライアント ───────────────────────────────────
+
+declare const process: { env: { NEXT_PUBLIC_API_URL?: string } };
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 

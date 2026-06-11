@@ -58,6 +58,10 @@ export default function DashboardPage() {
   const [selectedLogTitle, setSelectedLogTitle] = useState("");
   const [isLogModalOpen, setIsLogModalOpen] = useState(false);
   const [isLoadingLog, setIsLoadingLog] = useState(false);
+  const [selectedCaptureUrl, setSelectedCaptureUrl] = useState<string | null>(null);
+  const [selectedCaptureTitle, setSelectedCaptureTitle] = useState("");
+  const [isCaptureModalOpen, setIsCaptureModalOpen] = useState(false);
+  const [isLoadingCapture, setIsLoadingCapture] = useState(false);
   const [cardStat, setCardStat] = useState<CardStatsItem | null>(null);
 
   function logout() {
@@ -132,6 +136,44 @@ export default function DashboardPage() {
       alert(err.message || "ログファイルの取得に失敗しました");
     } finally {
       setIsLoadingLog(false);
+    }
+  }
+
+  async function handleViewCapture(gameId: number) {
+    const token = getValidAccessToken();
+    if (!token) return;
+    setIsLoadingCapture(true);
+    setSelectedCaptureTitle(`Game #${gameId} Result Capture`);
+    
+    if (selectedCaptureUrl) {
+      URL.revokeObjectURL(selectedCaptureUrl);
+      setSelectedCaptureUrl(null);
+    }
+
+    try {
+      const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
+      const res = await fetch(`${API_URL}/api/v1/games/captures/${gameId}`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (!res.ok) throw new Error("キャプチャの取得に失敗しました");
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      setSelectedCaptureUrl(objectUrl);
+      setIsCaptureModalOpen(true);
+    } catch (err: any) {
+      alert(err.message || "キャプチャの取得に失敗しました");
+    } finally {
+      setIsLoadingCapture(false);
+    }
+  }
+
+  function handleCloseCaptureModal() {
+    setIsCaptureModalOpen(false);
+    if (selectedCaptureUrl) {
+      URL.revokeObjectURL(selectedCaptureUrl);
+      setSelectedCaptureUrl(null);
     }
   }
 
@@ -320,6 +362,7 @@ export default function DashboardPage() {
                 )}
                 <InfoRow label="ラウンド" value={preview?.round_number != null ? String(preview.round_number) : "—"} highlight />
                 <InfoRow label="オープンカード" value={preview?.open_card ?? "—"} highlight />
+                <InfoRow label="タイマー" value={preview?.timer_value != null ? `${preview.timer_value}s` : "—"} highlight />
                 <InfoRow label="検出結果" value={preview?.result ? (RESULT_LABEL[preview.result as GameResult] ?? preview.result) : "—"} />
                 <InfoRow label="JPストック" value={preview?.jackpot_stock != null ? fmtAmount(preview.jackpot_stock) : "—"} />
                 {!preview && (
@@ -328,7 +371,7 @@ export default function DashboardPage() {
               </div>
 
               {/* 主要クロップ画像（コンパクト） */}
-              <div className="flex-1 grid grid-cols-2 md:grid-cols-4 gap-2">
+              <div className="flex-1 grid grid-cols-2 md:grid-cols-5 gap-2">
                 <CropPreview
                   label="ラウンド"
                   image={preview?.round_image}
@@ -339,6 +382,12 @@ export default function DashboardPage() {
                   label="オープンカード"
                   image={preview?.open_card_image}
                   ocr={preview?.open_card ?? null}
+                  maxW="max-w-[120px]"
+                />
+                <CropPreview
+                  label="タイマー"
+                  image={preview?.timer_image}
+                  ocr={preview?.timer_value != null ? String(preview.timer_value) : null}
                   maxW="max-w-[120px]"
                 />
                 <CropPreview
@@ -632,7 +681,7 @@ export default function DashboardPage() {
                 </thead>
                 <tbody className="divide-y divide-gray-800">
                   {games.map((g) => (
-                    <GameRow key={g.id} game={g} onViewLog={handleViewLog} />
+                    <GameRow key={g.id} game={g} onViewLog={handleViewLog} onViewCapture={handleViewCapture} />
                   ))}
                 </tbody>
               </table>
@@ -662,6 +711,36 @@ export default function DashboardPage() {
               <pre className="overflow-auto text-xs text-gray-300 font-mono bg-black/50 p-4 rounded border border-gray-900/50 mt-4 flex-1 whitespace-pre-wrap select-text">
                 {selectedLogText || "ログの内容がありません"}
               </pre>
+            </div>
+          </div>
+        )}
+
+        {/* 結果キャプチャモーダル */}
+        {isCaptureModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+            <div className="bg-gray-950 border border-gray-800 rounded-xl max-w-3xl w-full max-h-[85vh] flex flex-col p-6 shadow-2xl">
+              <div className="flex items-center justify-between border-b border-gray-800 pb-3 mb-4">
+                <h3 className="text-sm font-semibold text-yellow-400">
+                  📷 {selectedCaptureTitle}
+                </h3>
+                <button
+                  onClick={handleCloseCaptureModal}
+                  className="text-gray-500 hover:text-gray-300 transition text-xs font-semibold px-2 py-1 bg-gray-900 rounded border border-gray-800"
+                >
+                  閉じる
+                </button>
+              </div>
+              <div className="flex-1 overflow-auto flex items-center justify-center bg-black/40 rounded border border-gray-900 p-2">
+                {selectedCaptureUrl ? (
+                  <img
+                    src={selectedCaptureUrl}
+                    alt={selectedCaptureTitle}
+                    className="max-w-full max-h-[60vh] object-contain rounded-md"
+                  />
+                ) : (
+                  <div className="text-gray-500 text-xs py-8">画像を読み込めませんでした</div>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -796,7 +875,16 @@ function CopyButton({ value, title }: { value: string; title?: string }) {
   );
 }
 
-function GameRow({ game, onViewLog }: { game: Game; onViewLog: (logFile: string) => void | Promise<void>; key?: any }) {
+function GameRow({
+  game,
+  onViewLog,
+  onViewCapture,
+}: {
+  game: Game;
+  onViewLog: (logFile: string) => void | Promise<void>;
+  onViewCapture: (gameId: number) => void | Promise<void>;
+  key?: any;
+}) {
   const colorCls = RESULT_COLOR[game.result as GameResult] ?? "bg-gray-800 text-gray-300";
   const dt = new Date(game.recorded_at);
   const dtStr = `${dt.getMonth() + 1}/${dt.getDate()} ${dt.getHours().toString().padStart(2,"0")}:${dt.getMinutes().toString().padStart(2,"0")}`;
@@ -805,9 +893,20 @@ function GameRow({ game, onViewLog }: { game: Game; onViewLog: (logFile: string)
     <tr className="hover:bg-gray-800/50 transition">
       <td className="px-3 py-1.5 text-gray-500">{game.id}</td>
       <td className="px-3 py-1.5">
-        <span className={`px-2 py-0.5 rounded text-xs font-semibold ${colorCls}`}>
-          {RESULT_LABEL[game.result as GameResult] ?? game.result}
-        </span>
+        <div className="flex items-center gap-1.5">
+          <span className={`px-2 py-0.5 rounded text-xs font-semibold ${colorCls}`}>
+            {RESULT_LABEL[game.result as GameResult] ?? game.result}
+          </span>
+          {game.has_capture && (
+            <button
+              onClick={() => onViewCapture(game.id)}
+              title="結果表示のキャプチャを表示"
+              className="text-gray-400 hover:text-yellow-400 transition hover:scale-110 active:scale-95 p-0.5"
+            >
+              📷
+            </button>
+          )}
+        </div>
       </td>
       <td className="px-3 py-1.5 text-gray-400">{game.round_number ?? "—"}</td>
       <td className="px-1 py-1">

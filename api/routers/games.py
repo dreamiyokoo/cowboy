@@ -121,6 +121,7 @@ def _row_to_dict(row) -> dict:
     d["card_image"] = row.card_image
     d["ocr_debug"] = row.ocr_debug
     d["log_file_name"] = row.log_file_name
+    d["has_capture"] = Path(f"/app/logs/result_captures/{row.id}.jpg").exists()
     return d
 
 
@@ -215,6 +216,25 @@ async def get_games(
     count_row = await db.execute(text("SELECT COUNT(*) FROM games"))
     total = count_row.scalar()
     return {"games": games, "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/debug-db")
+async def debug_db(
+    db: AsyncSession = Depends(get_db),
+):
+    rows = await db.execute(
+        text("SELECT id, round_number, result, open_card, recorded_at FROM games WHERE round_number >= 231100 AND round_number <= 231120 ORDER BY round_number ASC")
+    )
+    res = []
+    for r in rows:
+        res.append({
+            "id": r.id,
+            "round_number": r.round_number,
+            "result": r.result,
+            "open_card": r.open_card,
+            "recorded_at": r.recorded_at.isoformat() if r.recorded_at else None
+        })
+    return res
 
 
 @router.get("/stats")
@@ -406,3 +426,18 @@ async def get_round_log(
             detail="Log file not found"
         )
     return FileResponse(log_path, media_type="text/plain")
+
+
+@router.get("/captures/{game_id}")
+async def get_game_capture(
+    game_id: int,
+    _: dict = Depends(get_current_user),
+):
+    """ゲームの結果表示キャプチャ画像ファイルを配信する"""
+    capture_path = Path("/app/logs/result_captures") / f"{game_id}.jpg"
+    if not capture_path.exists() or not capture_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Result capture not found"
+        )
+    return FileResponse(capture_path, media_type="image/jpeg")

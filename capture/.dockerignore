@@ -1,0 +1,6 @@
+card_shots/
+logs/
+__pycache__/
+*.png
+*.jpg
+*.jpeg

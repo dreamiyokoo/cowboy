@@ -37,6 +37,9 @@ class CapturePreviewPayload(BaseModel):
     winning_hand_scores: list[float] | None = None           # 勝利ハンド行輝度スコア
     jackpot_stock: int | None = None                         # ジャックポットストックコイン
     jackpot_stock_image: str | None = None                   # ジャックポットクロップ画像
+    timer_value: int | None = None                           # タイマーOCR検出値（カウントダウン秒数）
+    timer_image: str | None = None                           # タイマークロップ画像
+
 
 
 @router.post("/preview", status_code=status.HTTP_204_NO_CONTENT)
