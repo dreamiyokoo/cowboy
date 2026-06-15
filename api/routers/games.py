@@ -13,7 +13,7 @@ from deps import get_current_user
 
 router = APIRouter(prefix="/api/v1/games", tags=["games"])
 
-VALID_RESULTS = {"cowboy", "draw", "bull"}
+VALID_RESULTS = {"cowboy", "draw", "bull", "error"}
 VALID_HAND_TYPES = {1, 2, 3}
 DUPLICATE_GUARD_SECONDS = 60
 MAX_LIMIT = 1000
@@ -21,7 +21,7 @@ MAX_LIMIT = 1000
 
 class GamePostRequest(BaseModel):
     open_card: str | None = None
-    result: Literal["cowboy", "draw", "bull"]
+    result: Literal["cowboy", "draw", "bull", "error"]
     cowboy_hand: int | None = None
     bull_hand: int | None = None
     round_number: int | None = None
@@ -254,9 +254,10 @@ async def get_stats(
         }
 
     result_rows = await db.execute(text("SELECT result, COUNT(*) AS cnt FROM games GROUP BY result"))
-    result_counts = {"cowboy": 0, "draw": 0, "bull": 0}
+    result_counts = {"cowboy": 0, "draw": 0, "bull": 0, "error": 0}
     for row in result_rows:
-        result_counts[row.result] = row.cnt
+        if row.result in result_counts:
+            result_counts[row.result] = row.cnt
     result_rates = {k: round(v / total, 4) for k, v in result_counts.items()}
 
     full_bets_row = await db.execute(

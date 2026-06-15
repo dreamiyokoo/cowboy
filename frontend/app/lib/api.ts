@@ -27,7 +27,7 @@ export interface CapturePreview {
 
 // ── 型定義 ─────────────────────────────────────────────
 
-export type GameResult = "cowboy" | "draw" | "bull";
+export type GameResult = "cowboy" | "draw" | "bull" | "error";
 
 export interface Game {
   id: number;
@@ -79,8 +79,8 @@ export interface GamesResponse {
 
 export interface StatsResponse {
   total: number;
-  result_counts: { cowboy: number; draw: number; bull: number };
-  result_rates: { cowboy: number; draw: number; bull: number };
+  result_counts: { cowboy: number; draw: number; bull: number; error?: number };
+  result_rates: { cowboy: number; draw: number; bull: number; error?: number };
   records_with_full_bets: number;
   total_bet_all_positions: number | null;
   total_bet_sum: number;
@@ -195,12 +195,14 @@ export const RESULT_LABEL: Record<GameResult, string> = {
   cowboy: "カウボーイ",
   draw: "抽選",
   bull: "ブル",
+  error: "エラー",
 };
 
 export const RESULT_COLOR: Record<GameResult, string> = {
   cowboy: "bg-red-900 text-red-300",
   draw: "bg-green-900 text-green-300",
   bull: "bg-blue-900 text-blue-300",
+  error: "bg-red-600 text-white font-bold animate-pulse",
 };
 
 export const BET_COLUMNS: { key: keyof Game; label: string }[] = [

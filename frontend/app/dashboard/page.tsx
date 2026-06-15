@@ -578,7 +578,7 @@ export default function DashboardPage() {
         {/* 統計カード */}
         {stats && (
           <>
-            <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <section className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <StatCard label="総ゲーム数" value={stats.total} />
               <StatCard
                 label="カウボーイ"
@@ -594,6 +594,11 @@ export default function DashboardPage() {
                 label="抽選"
                 value={`${stats.result_counts.draw} (${(stats.result_rates.draw * 100).toFixed(1)}%)`}
                 className="border-green-800"
+              />
+              <StatCard
+                label="エラー"
+                value={`${stats.result_counts.error ?? 0} (${((stats.result_rates.error ?? 0) * 100).toFixed(1)}%)`}
+                className="border-red-950 bg-red-950/20 text-red-400"
               />
             </section>
 
@@ -618,6 +623,9 @@ export default function DashboardPage() {
             <ResultBar label="カウボーイ" count={stats.result_counts.cowboy} total={stats.total} color="bg-red-600" />
             <ResultBar label="ブル"       count={stats.result_counts.bull}   total={stats.total} color="bg-blue-600" />
             <ResultBar label="抽選"       count={stats.result_counts.draw}   total={stats.total} color="bg-green-600" />
+            {stats.result_counts.error !== undefined && stats.result_counts.error > 0 && (
+              <ResultBar label="エラー"       count={stats.result_counts.error}   total={stats.total} color="bg-red-800" />
+            )}
           </section>
         )}
 
@@ -908,7 +916,19 @@ function GameRow({
           )}
         </div>
       </td>
-      <td className="px-3 py-1.5 text-gray-400">{game.round_number ?? "—"}</td>
+      <td className="px-3 py-1.5 text-gray-400">
+        {game.round_number ? (
+          <button
+            onClick={() => onViewLog(game.log_file_name || `${game.round_number}.log`)}
+            title="ラウンドログを表示"
+            className="hover:text-yellow-400 hover:underline transition font-mono active:scale-95 text-left"
+          >
+            {game.round_number}
+          </button>
+        ) : (
+          "—"
+        )}
+      </td>
       <td className="px-1 py-1">
         <div className="flex items-center gap-1">
           {game.card_image && (

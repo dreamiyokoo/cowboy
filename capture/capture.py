@@ -886,14 +886,16 @@ def detect_timer(img: np.ndarray, crop: list[int], debug: bool = False) -> int |
     if debug:
         cv2.imwrite("/tmp/cowboy_timer_inv.png", inv)
 
-    tess_base = "--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789"
+    tess_base = "--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789Ss"
     for psm in [7, 8, 13]:
         text = pytesseract.image_to_string(inv, config=tess_base.format(psm=psm)).strip()
         if debug:
             print(f"[DEBUG] timer Tess(inv) psm={psm}: {repr(text)}")
-        nums = [n for n in re.findall(r"\d+", text) if 0 <= int(n) <= 15]
-        if nums:
-            return int(nums[0])
+        m = re.search(r"(\d+)\s*[Ss]", text)
+        if m:
+            val = int(m.group(1))
+            if 0 <= val <= 15:
+                return val
 
     # フォールバック: EasyOCR
     reader = _get_ocr_reader()
@@ -902,9 +904,11 @@ def detect_timer(img: np.ndarray, crop: list[int], debug: bool = False) -> int |
         full_text = "".join(results)
         if debug:
             print(f"[DEBUG] timer EasyOCR: {repr(full_text)}")
-        nums = [n for n in re.findall(r"\d+", full_text) if 0 <= int(n) <= 15]
-        if nums:
-            return int(nums[0])
+        m = re.search(r"(\d+)\s*[Ss]", full_text)
+        if m:
+            val = int(m.group(1))
+            if 0 <= val <= 15:
+                return val
 
     return None
 
@@ -1149,6 +1153,8 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
         latest_timer_value: int | None = None  # 最新のタイマー検出値
         timer_active_last_seen = 0.0           # タイマーが有効だった最終時刻
         timer_active_value = 0                 # タイマーが有効だった時の値
+        countdown_end_time = 0.0               # 結果チェック可能になる目標時刻
+        result_phase_timer_streak = 0          # RESULT フェーズ中のタイマー連続検出回数
         
         ocr_debug_list: list[str] = []      # OCR詳細デバッグログ
         log_file_name: str | None = None    # ログファイル名
@@ -1209,6 +1215,8 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                 capturer.reset()
                 timer_active_last_seen = 0.0
                 timer_active_value = 0
+                countdown_end_time = 0.0
+                result_phase_timer_streak = 0
                 print(f"[INFO] クールダウン終了 → PREPARING")
                 if once:
                     break
@@ -1256,22 +1264,30 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
 
             # ── 結果検出 ──
             can_check_result = False
-            if timer_value == 0:
-                can_check_result = True
-            elif timer_active_last_seen > 0.0:
-                countdown_end_time = timer_active_last_seen + timer_active_value
-                if now >= countdown_end_time - 0.5:
-                    can_check_result = True
-                else:
+            if state == State.BETTING or state == State.RESULT:
+                if state == State.BETTING and timer_value is not None and timer_value > 0:
+                    # タイマーが残り時間を明示している → 結果表示前
                     if debug:
-                        print(f"[DEBUG] 結果チェックスキップ (タイマーカウントダウン中: 残り {countdown_end_time - now:.1f}s)")
-            else:
-                elapsed_in_betting = now - watching_start if state == State.BETTING else 999.0
-                if elapsed_in_betting >= result_check_delay:
-                    can_check_result = True
+                        print(f"[DEBUG] 結果チェックスキップ (タイマー残り {timer_value}s)")
+                elif timer_value == 0:
+                    if now >= countdown_end_time + 0.5:
+                        can_check_result = True
+                    else:
+                        if debug:
+                            print(f"[DEBUG] 結果チェックスキップ (timer=0, WIN表示待ち: 残り {countdown_end_time + 0.5 - now:.1f}s)")
+                elif countdown_end_time > 0.0:
+                    if now >= countdown_end_time + 0.5:
+                        can_check_result = True
+                    else:
+                        if debug:
+                            print(f"[DEBUG] 結果チェックスキップ (カウントダウン中: 残り {countdown_end_time + 0.5 - now:.1f}s)")
                 else:
-                    if debug:
-                        print(f"[DEBUG] 結果チェックスキップ (経過時間不足: {elapsed_in_betting:.1f}s < {result_check_delay}s)")
+                    elapsed_in_betting = now - watching_start if state == State.BETTING else 999.0
+                    if elapsed_in_betting >= result_check_delay:
+                        can_check_result = True
+                    else:
+                        if debug:
+                            print(f"[DEBUG] 結果チェックスキップ (経過時間不足: {elapsed_in_betting:.1f}s < {result_check_delay}s)")
 
             if can_check_result:
                 result = detect_result(img, cap["result_crop"], debug=debug)
@@ -1280,34 +1296,49 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
 
             # ── ステート遷移ロジック ──
             if state == State.PREPARING:
-                if is_green:
-                    # 緑（裏面）なので準備中を維持
-                    if timer_value is not None and 1 <= timer_value <= 15:
-                        state = State.BETTING
-                        open_detected_at = datetime.now(UTC).isoformat()
-                        print(f"[INFO] タイマー検出による強制BETTING移行 (PREPARING → BETTING) at={open_detected_at}")
-                        watching_start = time.time()
-                        send_preview_now = True
-                else:
-                    # 緑ではなくなった（カードオープン検知！）
+                # 優先: タイマー検出による移行
+                if timer_value is not None and 1 <= timer_value <= 15:
                     state = State.BETTING
                     open_detected_at = datetime.now(UTC).isoformat()
-                    print(f"[INFO] カードオープン検知 (PREPARING → BETTING)  at={open_detected_at}")
-                    watching_start = time.time()  # タイムアウト計測開始
+                    watching_start = now
+                    countdown_end_time = now + timer_value
+                    print(f"[INFO] タイマー検出によるBETTING移行: timer={timer_value}s (結果予定: +{timer_value:.1f}s) at={open_detected_at}")
                     
-                    # OCRの成否に関わらず、開いた瞬間の画像をキャッシュする
                     y0, y1, x0, x1 = cap["open_card_crop"]
                     region = img[y0:y1, x0:x1]
                     if region.size > 0:
                         large_reg = cv2.resize(region, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
                         cached_card_image = enhance_card_image(large_reg)
-                    send_preview_now = True  # カードオープン直後は即時プレビュー送信
-
+                    send_preview_now = True
+                    if card:
+                        latest_open_card = card
+                        print(f"[INFO] オープンカード初回検出: {card}")
+                # フォールバック: カードオープン検知（タイマーOCRが失敗し、緑でなくなった場合）
+                elif not is_green:
+                    state = State.BETTING
+                    open_detected_at = datetime.now(UTC).isoformat()
+                    watching_start = now
+                    countdown_end_time = now + 15.0
+                    print(f"[INFO] カードオープン検知によるフォールバックBETTING移行 (結果予定: +15.0s) at={open_detected_at}")
+                    
+                    y0, y1, x0, x1 = cap["open_card_crop"]
+                    region = img[y0:y1, x0:x1]
+                    if region.size > 0:
+                        large_reg = cv2.resize(region, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
+                        cached_card_image = enhance_card_image(large_reg)
+                    send_preview_now = True
                     if card:
                         latest_open_card = card
                         print(f"[INFO] オープンカード初回検出: {card}")
 
             elif state == State.BETTING:
+                # タイマー値が検出されたら、目標時刻を補正・更新する
+                if timer_value is not None and 1 <= timer_value <= 15:
+                    new_end_time = now + timer_value
+                    if abs(new_end_time - countdown_end_time) > 1.0:
+                        print(f"[INFO] countdown_end_time を補正: {countdown_end_time - now:.1f}s -> {timer_value:.1f}s")
+                    countdown_end_time = new_end_time
+
                 if card:
                     if latest_open_card is None:
                         open_detected_at = datetime.now(UTC).isoformat()
@@ -1332,10 +1363,23 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     print(f"[INFO] 結果表示を検出 (BETTING → RESULT): result={result}  at={result_detected_at}")
                     result_streak = 1
                     last_streak_result = result
+                    result_phase_timer_streak = 0
                     send_preview_now = True  # 結果検出直後は即時プレビュー送信
 
             elif state == State.RESULT:
-                if result is None:
+                # 結果表示フェーズ中のタイマー誤検出に対するエラーハンドリング
+                if timer_value is not None and 1 <= timer_value <= 15:
+                    result_phase_timer_streak += 1
+                    print(
+                        f"[WARN] 結果表示フェーズ中にタイマー残り時間 {timer_value}s を検出 "
+                        f"({result_phase_timer_streak}/2)。OCR誤読の可能性があります。"
+                    )
+                    if result_phase_timer_streak >= 2:
+                        print("[WARN] タイマー連続検出により結果を強制的に 'error' として処理します。")
+                        result = "error"
+                        result_streak = result_stable_count
+                        last_streak_result = "error"
+                elif result is None:
                     # 結果が消失（前フレームの誤認識など）
                     print("[WARN] 結果表示が消失しました。BETTING に戻ります。")
                     state = State.BETTING
@@ -1349,10 +1393,9 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                         last_streak_result = result
                     print(f"[INFO] 結果検出中 ({result_streak}/{result_stable_count}): result={result}")
 
-            # ベット額: カードオープン（BETTING遷移）から12秒経過した瞬間に1回だけスキャン
+            # ベット額: カウントダウン終了の 4 秒前（タイマーが4秒付近）にスキャン
             if state == State.BETTING and "bet_crops" in cap:
-                elapsed_since_open = now - watching_start
-                if elapsed_since_open >= 12.0 and not bet_scanned_this_round:
+                if (countdown_end_time - now <= 4.0) and not bet_scanned_this_round:
                     new_bets = detect_all_bets(img, cap["bet_crops"], debug=debug)
                     for k, v in new_bets.items():
                         if v is not None:
@@ -1388,9 +1431,38 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                                 if state == State.BETTING and latest_round_number is not None:
                                     print(
                                         f"[WARN] 結果を検出できないままラウンド番号が更新されました ({latest_round_number} → {rn})。 "
-                                        "前ラウンドをタイムアウト（未確定）としてログ保存し、新ラウンドを開始します。"
+                                        "前ラウンドをエラーとしてPOSTおよびログ保存し、新ラウンドを開始します。"
                                     )
-                                    save_round_log(capturer, latest_round_number)
+                                    log_file_name = save_round_log(capturer, latest_round_number)
+                                    
+                                    # 前ラウンドのエラーPOST
+                                    error_payload = {
+                                        "open_card": latest_open_card,
+                                        "result": "error",
+                                        "cowboy_hand": None,
+                                        "bull_hand": None,
+                                        "round_number": latest_round_number,
+                                        "jackpot_stock": cached_jackpot_stock,
+                                        "bet_cowboy":    cached_bets.get("cowboy"),
+                                        "bet_draw":      cached_bets.get("draw"),
+                                        "bet_bull":      cached_bets.get("bull"),
+                                        "bet_any_flash": cached_bets.get("any_flash"),
+                                        "bet_any_pair":  cached_bets.get("any_pair"),
+                                        "bet_any_ace":   cached_bets.get("any_ace"),
+                                        "bet_win_high":  cached_bets.get("win_high"),
+                                        "bet_win_two":   cached_bets.get("win_two"),
+                                        "bet_win_sf":    cached_bets.get("win_sf"),
+                                        "bet_win_fh":    cached_bets.get("win_fh"),
+                                        "bet_win_four":  cached_bets.get("win_four"),
+                                        "card_image":    encode_crop(img, cap["open_card_crop"], scale=4) if latest_open_card else None,
+                                        "ocr_debug":     "\n".join(ocr_debug_list) if ocr_debug_list else None,
+                                        "log_file_name": log_file_name,
+                                    }
+                                    try:
+                                        post_game(client, base_url, token, error_payload)
+                                        print(f"[INFO] 前ラウンド ({latest_round_number}) のエラー POST に成功しました。")
+                                    except Exception as e:
+                                        print(f"[ERROR] 前ラウンドのエラー POST に失敗しました: {e}", file=sys.stderr)
                                     
                                     # 新しいラウンドのカード検出に備えて、オープンカード状態などをリセット
                                     latest_open_card = None
@@ -1495,7 +1567,36 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     )
                     # カードもラウンド番号も一切検出できなかった場合は、無効な画面（または配信停止など）とみなしてログ保存をスキップ
                     if latest_round_number is not None or latest_open_card is not None:
-                        save_round_log(capturer, latest_round_number)
+                        log_file_name = save_round_log(capturer, latest_round_number)
+                        
+                        # エラーPOST
+                        error_payload = {
+                            "open_card": latest_open_card,
+                            "result": "error",
+                            "cowboy_hand": None,
+                            "bull_hand": None,
+                            "round_number": latest_round_number,
+                            "jackpot_stock": cached_jackpot_stock,
+                            "bet_cowboy":    cached_bets.get("cowboy"),
+                            "bet_draw":      cached_bets.get("draw"),
+                            "bet_bull":      cached_bets.get("bull"),
+                            "bet_any_flash": cached_bets.get("any_flash"),
+                            "bet_any_pair":  cached_bets.get("any_pair"),
+                            "bet_any_ace":   cached_bets.get("any_ace"),
+                            "bet_win_high":  cached_bets.get("win_high"),
+                            "bet_win_two":   cached_bets.get("win_two"),
+                            "bet_win_sf":    cached_bets.get("win_sf"),
+                            "bet_win_fh":    cached_bets.get("win_fh"),
+                            "bet_win_four":  cached_bets.get("win_four"),
+                            "card_image":    encode_crop(img, cap["open_card_crop"], scale=4) if latest_open_card else None,
+                            "ocr_debug":     "\n".join(ocr_debug_list) if ocr_debug_list else None,
+                            "log_file_name": log_file_name,
+                        }
+                        try:
+                            post_game(client, base_url, token, error_payload)
+                            print(f"[INFO] タイムアウトラウンド ({latest_round_number}) のエラー POST に成功しました。")
+                        except Exception as e:
+                            print(f"[ERROR] タイムアウトラウンドのエラー POST に失敗しました: {e}", file=sys.stderr)
                     else:
                         print("[INFO] カードおよびラウンド番号が未検出のため、空ログの保存をスキップします。")
                     
@@ -1510,18 +1611,20 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     latest_timer_value = None
                     timer_active_last_seen = 0.0
                     timer_active_value = 0
+                    countdown_end_time = 0.0
 
                 time.sleep(poll_fast)
                 if once:
                     break
                 continue
 
-            # 結果あり: 連続カウント
-            if result == last_streak_result:
-                result_streak += 1
-            else:
-                result_streak = 1
-                last_streak_result = result
+            # 結果あり: 連続カウント（RESULT state ブロックで未更新の場合のみ加算）
+            if result_streak < result_stable_count:
+                if result == last_streak_result:
+                    result_streak += 1
+                else:
+                    result_streak = 1
+                    last_streak_result = result
 
             print(
                 f"[INFO] 結果検出 ({result_streak}/{result_stable_count}): "
@@ -1658,6 +1761,8 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
             latest_timer_value = None
             timer_active_last_seen = 0.0
             timer_active_value = 0
+            countdown_end_time = 0.0
+            result_phase_timer_streak = 0
             print(f"[INFO] → COOLDOWN ({post_round_cooldown}s)")
 
             if once:
