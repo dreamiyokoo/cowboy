@@ -333,11 +333,22 @@ def detect_result(img: np.ndarray, crop: list[int], debug: bool = False) -> str 
         print(f"[DEBUG] result brightness (saturated): {scores}")
         cv2.imwrite("/tmp/cowboy_result_region.png", region)
 
-    # 鮮やかな WIN バッジが表示されているセクションは 0.20 以上になる
-    BRIGHT_THRESHOLD = 0.20
-    max_score = max(scores.values())
+    # 鮮やかな WIN バッジが表示されているセクションはある程度の輝度が必要
+    # かつ他セクションに比べて明らかに優勢であることを確認する（誤検出防止）
+    BRIGHT_THRESHOLD = 0.25
+    DOMINANCE_DELTA = 0.06  # 2位との差がこの値以上なら確定
+
+    sorted_scores = sorted(scores.values(), reverse=True)
+    max_score = sorted_scores[0]
+    second_score = sorted_scores[1] if len(sorted_scores) > 1 else 0.0
 
     if max_score < BRIGHT_THRESHOLD:
+        return None
+
+    # 支配度チェック: 最大値が十分に2位より大きいこと
+    if (max_score - second_score) < DOMINANCE_DELTA:
+        if debug:
+            print(f"[DEBUG] result ambiguous: max={max_score:.3f}, 2nd={second_score:.3f} -> reject")
         return None
 
     return max(scores, key=scores.get)
@@ -1416,11 +1427,14 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                             rn_streak = 1
 
                         if rn_streak >= 2:
-                            # 前回確定したラウンド番号と比較し、矛盾（減少または+3を超える急増）があれば自動補正
+                            # 前回確定したラウンド番号と比較し、矛盾（減少または急増）があれば自動補正
+                            # 前ラウンド確定から28秒以内はインクリメント(+1)のみ許容する（OCR誤読による+2ジャンプ対策）
                             if last_confirmed_round is not None and (time.time() - last_confirmed_time < 60):
-                                if rn <= last_confirmed_round or rn > last_confirmed_round + 3:
+                                elapsed_since_confirmed = time.time() - last_confirmed_time
+                                max_jump = 1 if elapsed_since_confirmed < 28 else 3
+                                if rn <= last_confirmed_round or rn > last_confirmed_round + max_jump:
                                     corrected_rn = last_confirmed_round + 1
-                                    print(f"[WARN] ラウンド番号の誤検知を判定 (OCR: {rn}, 前回確定: {last_confirmed_round})。{corrected_rn} に補正します。")
+                                    print(f"[WARN] ラウンド番号の誤検知を判定 (OCR: {rn}, 前回確定: {last_confirmed_round}, 経過: {elapsed_since_confirmed:.1f}s, 許容: +{max_jump})。{corrected_rn} に補正します。")
                                     rn = corrected_rn
 
                             if rn != latest_round_number:
@@ -1428,7 +1442,8 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                                 
                                 # BETTING 中にラウンド番号が次の番号に変わってしまった場合
                                 # = 前のラウンドの結果画面判定を見落としたまま、新しいラウンドが始まったことを意味する
-                                if state == State.BETTING and latest_round_number is not None:
+                                # ただし latest_round_number == last_confirmed_round の場合は既にエラーPOST済みのためスキップ
+                                if state == State.BETTING and latest_round_number is not None and latest_round_number != last_confirmed_round:
                                     print(
                                         f"[WARN] 結果を検出できないままラウンド番号が更新されました ({latest_round_number} → {rn})。 "
                                         "前ラウンドをエラーとしてPOSTおよびログ保存し、新ラウンドを開始します。"
@@ -1463,7 +1478,11 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                                         print(f"[INFO] 前ラウンド ({latest_round_number}) のエラー POST に成功しました。")
                                     except Exception as e:
                                         print(f"[ERROR] 前ラウンドのエラー POST に失敗しました: {e}", file=sys.stderr)
-                                    
+
+                                    # エラーPOSTでも last_confirmed_round を更新して次ラウンドの補正を有効にする
+                                    last_confirmed_round = latest_round_number
+                                    last_confirmed_time = time.time()
+
                                     # 新しいラウンドのカード検出に備えて、オープンカード状態などをリセット
                                     latest_open_card = None
                                     cached_bets = {k: None for k in ALL_BET_KEYS}
@@ -1597,13 +1616,21 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                             print(f"[INFO] タイムアウトラウンド ({latest_round_number}) のエラー POST に成功しました。")
                         except Exception as e:
                             print(f"[ERROR] タイムアウトラウンドのエラー POST に失敗しました: {e}", file=sys.stderr)
+
+                        # エラーPOSTでも last_confirmed_round を更新して次ラウンドの補正を有効にする
+                        if latest_round_number is not None:
+                            last_confirmed_round = latest_round_number
+                            last_confirmed_time = time.time()
                     else:
                         print("[INFO] カードおよびラウンド番号が未検出のため、空ログの保存をスキップします。")
-                    
+
                     state = State.PREPARING
                     watching_start = time.time()
                     result_streak = 0
                     last_streak_result = None
+                    # latest_round_number をリセットして BETTING 移行後の「ラウンド変更誤検知」を防ぐ
+                    latest_round_number = None
+                    latest_open_card = None
                     round_number_scanned_this_round = False
                     ocr_debug_list.clear()
                     log_file_name = None

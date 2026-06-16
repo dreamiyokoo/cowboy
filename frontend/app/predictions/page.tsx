@@ -174,6 +174,36 @@ export default function PredictionsPage() {
 
   const rankOrder = ["A", "K", "Q", "J", "10", "9", "8", "7", "6", "5", "4", "3", "2"];
 
+  // --- Validation tab computed values ---
+  const overallCowboyRate = stats.total ? stats.results.cowboy / stats.total : 0;
+  const overallBullRate   = stats.total ? stats.results.bull   / stats.total : 0;
+  const MIN_TOTAL    = 100;
+  const MIN_AUTOCORR = 30;
+  const MIN_BET      = 30;
+  const ANOMALY_THRESHOLD = 0.05;
+
+  const autocorrInsufficient =
+    stats.total < MIN_TOTAL ||
+    stats.autocorrelation.total_after_c < MIN_AUTOCORR ||
+    stats.autocorrelation.total_after_b < MIN_AUTOCORR;
+  const cDiff = stats.autocorrelation.c_after_c_rate - overallCowboyRate;
+  const bDiff = stats.autocorrelation.b_after_b_rate - overallBullRate;
+  const autocorrAnomalous =
+    !autocorrInsufficient &&
+    (Math.abs(cDiff) > ANOMALY_THRESHOLD || Math.abs(bDiff) > ANOMALY_THRESHOLD);
+
+  const betInsufficient =
+    stats.cBetHigher.total < MIN_BET ||
+    stats.bBetHigher.total < MIN_BET;
+  const cBetDiff = stats.cBetHigher.rate - overallCowboyRate;
+  const bBetDiff = stats.bBetHigher.rate - overallBullRate;
+  const betSuspicious =
+    !betInsufficient &&
+    (cBetDiff < -ANOMALY_THRESHOLD || bBetDiff < -ANOMALY_THRESHOLD);
+  const betNoteworthy =
+    !betInsufficient && !betSuspicious &&
+    (Math.abs(cBetDiff) > ANOMALY_THRESHOLD || Math.abs(bBetDiff) > ANOMALY_THRESHOLD);
+
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 font-sans">
       {/* Header */}
@@ -270,18 +300,21 @@ export default function PredictionsPage() {
                   <div className="bg-gray-900/40 border border-gray-800 rounded-xl p-5 backdrop-blur-sm">
                     <p className="text-gray-400 text-xs font-semibold uppercase tracking-wider">分析対象ゲーム数</p>
                     <p className="text-3xl font-bold text-gray-100 mt-2">{stats.total} <span className="text-sm font-normal text-gray-400">Rounds</span></p>
+                    {stats.total < MIN_TOTAL && (
+                      <p className="text-xs text-amber-500 mt-1">※ 統計には {MIN_TOTAL} 件以上推奨</p>
+                    )}
                   </div>
                   <div className="bg-red-950/20 border border-red-900/30 rounded-xl p-5 backdrop-blur-sm">
                     <p className="text-red-400 text-xs font-semibold uppercase tracking-wider">カウボーイ勝率</p>
                     <p className="text-3xl font-bold text-red-400 mt-2">
-                      {stats.total ? ((stats.results.cowboy / stats.total) * 100).toFixed(1) : 0}%
+                      {stats.total ? ((overallCowboyRate) * 100).toFixed(1) : 0}%
                     </p>
                     <p className="text-xs text-gray-500 mt-1">出現数: {stats.results.cowboy}回</p>
                   </div>
                   <div className="bg-blue-950/20 border border-blue-900/30 rounded-xl p-5 backdrop-blur-sm">
                     <p className="text-blue-400 text-xs font-semibold uppercase tracking-wider">ブル勝率</p>
                     <p className="text-3xl font-bold text-blue-400 mt-2">
-                      {stats.total ? ((stats.results.bull / stats.total) * 100).toFixed(1) : 0}%
+                      {stats.total ? ((overallBullRate) * 100).toFixed(1) : 0}%
                     </p>
                     <p className="text-xs text-gray-500 mt-1">出現数: {stats.results.bull}回</p>
                   </div>
@@ -302,20 +335,51 @@ export default function PredictionsPage() {
                     </h3>
                     <div className="space-y-3">
                       <div className="flex justify-between items-center bg-gray-950/50 p-3 rounded border border-gray-800/50">
-                        <span className="text-sm text-gray-300">カウボーイの次もカウボーイになる確率:</span>
-                        <span className="text-md font-bold text-red-400">{(stats.autocorrelation.c_after_c_rate * 100).toFixed(1)}%</span>
+                        <div>
+                          <span className="text-sm text-gray-300">カウボーイの次もカウボーイになる確率:</span>
+                          <span className="text-xs text-gray-500 ml-2">({stats.autocorrelation.total_after_c}件)</span>
+                        </div>
+                        {stats.autocorrelation.total_after_c < MIN_AUTOCORR
+                          ? <span className="text-xs text-amber-500 font-semibold">データ不足</span>
+                          : <span className="text-md font-bold text-red-400">{(stats.autocorrelation.c_after_c_rate * 100).toFixed(1)}%</span>
+                        }
                       </div>
                       <div className="flex justify-between items-center bg-gray-950/50 p-3 rounded border border-gray-800/50">
-                        <span className="text-sm text-gray-300">ブルの次もブルになる確率:</span>
-                        <span className="text-md font-bold text-blue-400">{(stats.autocorrelation.b_after_b_rate * 100).toFixed(1)}%</span>
+                        <div>
+                          <span className="text-sm text-gray-300">ブルの次もブルになる確率:</span>
+                          <span className="text-xs text-gray-500 ml-2">({stats.autocorrelation.total_after_b}件)</span>
+                        </div>
+                        {stats.autocorrelation.total_after_b < MIN_AUTOCORR
+                          ? <span className="text-xs text-amber-500 font-semibold">データ不足</span>
+                          : <span className="text-md font-bold text-blue-400">{(stats.autocorrelation.b_after_b_rate * 100).toFixed(1)}%</span>
+                        }
                       </div>
                     </div>
-                    <div className="bg-yellow-950/10 border border-yellow-900/30 rounded-lg p-4 text-xs text-yellow-400/90 leading-relaxed">
-                      <strong>【統計検証結果】</strong><br />
-                      カウボーイ・ブルともに、前回のゲーム結果にかかわらず、次の勝率は全体の勝率（コ: 約49%、ブ: 約45%）とほぼ一致します。
-                      これは、ゲーム結果が過去の結果に依存しない <strong>独立試行（メモリレス・ランダム）</strong> であることを示しており、
-                      単純な連チャン罫線による予測は期待値の向上に寄与しません。
-                    </div>
+
+                    {autocorrInsufficient ? (
+                      <div className="bg-amber-950/20 border border-amber-700/40 rounded-lg p-4 text-xs text-amber-400 leading-relaxed">
+                        <strong>【統計検証結果】データ収集中</strong><br />
+                        信頼性の高い時系列分析には、全体 {MIN_TOTAL} 件・各連続パターン {MIN_AUTOCORR} 件以上のデータが必要です。
+                        現在: 全体 {stats.total} 件 / C後 {stats.autocorrelation.total_after_c} 件 / B後 {stats.autocorrelation.total_after_b} 件。
+                        引き続きデータを蓄積してください。
+                      </div>
+                    ) : autocorrAnomalous ? (
+                      <div className="bg-orange-950/20 border border-orange-700/40 rounded-lg p-4 text-xs text-orange-400 leading-relaxed">
+                        <strong>【統計検証結果】パターン検出の可能性</strong><br />
+                        全体勝率（コ: {(overallCowboyRate * 100).toFixed(1)}% / ブ: {(overallBullRate * 100).toFixed(1)}%）と比較して、
+                        連続パターン時の勝率に {Math.max(Math.abs(cDiff), Math.abs(bDiff)) > 0.1 ? "顕著な" : "やや"} 差異が見られます
+                        （C後C: {cDiff > 0 ? "+" : ""}{(cDiff * 100).toFixed(1)}% / B後B: {bDiff > 0 ? "+" : ""}{(bDiff * 100).toFixed(1)}%）。
+                        偶然の偏りの可能性もありますが、さらなるデータ蓄積で確認してください。
+                      </div>
+                    ) : (
+                      <div className="bg-yellow-950/10 border border-yellow-900/30 rounded-lg p-4 text-xs text-yellow-400/90 leading-relaxed">
+                        <strong>【統計検証結果】独立試行と判定</strong><br />
+                        全体勝率（コ: {(overallCowboyRate * 100).toFixed(1)}% / ブ: {(overallBullRate * 100).toFixed(1)}%）と
+                        連続パターン時の勝率はほぼ一致しています（差: C後C {cDiff > 0 ? "+" : ""}{(cDiff * 100).toFixed(1)}% / B後B {bDiff > 0 ? "+" : ""}{(bDiff * 100).toFixed(1)}%）。
+                        ゲーム結果は過去に依存しない <strong>独立試行（メモリレス）</strong> の特性を示しており、
+                        連チャン罫線による予測は期待値向上に寄与しません。
+                      </div>
+                    )}
                   </div>
 
                   {/* Bet Volume Correlation */}
@@ -325,20 +389,56 @@ export default function PredictionsPage() {
                     </h3>
                     <div className="space-y-3">
                       <div className="flex justify-between items-center bg-gray-950/50 p-3 rounded border border-gray-800/50">
-                        <span className="text-sm text-gray-300">カウボーイに多く賭けられた時の勝率:</span>
-                        <span className="text-md font-bold text-red-400">{(stats.cBetHigher.rate * 100).toFixed(1)}%</span>
+                        <div>
+                          <span className="text-sm text-gray-300">カウボーイに多く賭けられた時の勝率:</span>
+                          <span className="text-xs text-gray-500 ml-2">({stats.cBetHigher.total}件)</span>
+                        </div>
+                        {stats.cBetHigher.total < MIN_BET
+                          ? <span className="text-xs text-amber-500 font-semibold">データ不足</span>
+                          : <span className="text-md font-bold text-red-400">{(stats.cBetHigher.rate * 100).toFixed(1)}%</span>
+                        }
                       </div>
                       <div className="flex justify-between items-center bg-gray-950/50 p-3 rounded border border-gray-800/50">
-                        <span className="text-sm text-gray-300">ブルに多く賭けられた時の勝率:</span>
-                        <span className="text-md font-bold text-blue-400">{(stats.bBetHigher.rate * 100).toFixed(1)}%</span>
+                        <div>
+                          <span className="text-sm text-gray-300">ブルに多く賭けられた時の勝率:</span>
+                          <span className="text-xs text-gray-500 ml-2">({stats.bBetHigher.total}件)</span>
+                        </div>
+                        {stats.bBetHigher.total < MIN_BET
+                          ? <span className="text-xs text-amber-500 font-semibold">データ不足</span>
+                          : <span className="text-md font-bold text-blue-400">{(stats.bBetHigher.rate * 100).toFixed(1)}%</span>
+                        }
                       </div>
                     </div>
-                    <div className="bg-yellow-950/10 border border-yellow-900/30 rounded-lg p-4 text-xs text-yellow-400/90 leading-relaxed">
-                      <strong>【回収・操作判定】</strong><br />
-                      投票が偏った側の勝率は、全体平均と比べて有意な低下を示していません。
-                      多くのゲームアプリに見られる「多く賭けられた側を強制的に負けさせてハウスが回収する」といった、
-                      <strong>ベット偏りに連動した不正アルゴリズムの明確な兆候は見受けられません</strong>。
-                    </div>
+
+                    {betInsufficient ? (
+                      <div className="bg-amber-950/20 border border-amber-700/40 rounded-lg p-4 text-xs text-amber-400 leading-relaxed">
+                        <strong>【回収・操作判定】ベットデータ不足</strong><br />
+                        操作判定には各方向 {MIN_BET} 件以上のベット偏りデータが必要です。
+                        現在: カウボーイ優勢 {stats.cBetHigher.total} 件 / ブル優勢 {stats.bBetHigher.total} 件。
+                        ベット額が記録されているゲームが増えると判定が可能になります。
+                      </div>
+                    ) : betSuspicious ? (
+                      <div className="bg-red-950/30 border border-red-700/50 rounded-lg p-4 text-xs text-red-400 leading-relaxed">
+                        <strong>【回収・操作判定】⚠️ 操作の兆候を検出</strong><br />
+                        多く賭けられた側の勝率が全体平均より有意に低下しています
+                        （コ偏重時: {cBetDiff > 0 ? "+" : ""}{(cBetDiff * 100).toFixed(1)}% / ブ偏重時: {bBetDiff > 0 ? "+" : ""}{(bBetDiff * 100).toFixed(1)}%）。
+                        「賭け金の多い側を負けさせてハウスが回収する」アルゴリズムの可能性があります。
+                        データをさらに蓄積して確認してください。
+                      </div>
+                    ) : betNoteworthy ? (
+                      <div className="bg-orange-950/20 border border-orange-700/40 rounded-lg p-4 text-xs text-orange-400 leading-relaxed">
+                        <strong>【回収・操作判定】軽微な偏りを検出</strong><br />
+                        全体平均との差異: コ偏重時 {cBetDiff > 0 ? "+" : ""}{(cBetDiff * 100).toFixed(1)}% / ブ偏重時 {bBetDiff > 0 ? "+" : ""}{(bBetDiff * 100).toFixed(1)}%。
+                        現時点では偶然の範囲内の可能性が高いですが、引き続き監視してください。
+                      </div>
+                    ) : (
+                      <div className="bg-yellow-950/10 border border-yellow-900/30 rounded-lg p-4 text-xs text-yellow-400/90 leading-relaxed">
+                        <strong>【回収・操作判定】異常なし</strong><br />
+                        賭け金が偏った側の勝率は全体平均（コ: {(overallCowboyRate * 100).toFixed(1)}% / ブ: {(overallBullRate * 100).toFixed(1)}%）と
+                        ほぼ一致しています（差: コ偏重時 {cBetDiff > 0 ? "+" : ""}{(cBetDiff * 100).toFixed(1)}% / ブ偏重時 {bBetDiff > 0 ? "+" : ""}{(bBetDiff * 100).toFixed(1)}%）。
+                        <strong>ベット偏りに連動した不正アルゴリズムの明確な兆候は見受けられません</strong>。
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

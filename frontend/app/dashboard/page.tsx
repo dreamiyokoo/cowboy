@@ -688,8 +688,8 @@ export default function DashboardPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800">
-                  {games.map((g) => (
-                    <GameRow key={g.id} game={g} onViewLog={handleViewLog} onViewCapture={handleViewCapture} />
+                  {games.map((g, i) => (
+                    <GameRow key={g.id} game={g} prevGame={games[i + 1]} onViewLog={handleViewLog} onViewCapture={handleViewCapture} />
                   ))}
                 </tbody>
               </table>
@@ -885,17 +885,30 @@ function CopyButton({ value, title }: { value: string; title?: string }) {
 
 function GameRow({
   game,
+  prevGame,
   onViewLog,
   onViewCapture,
 }: {
   game: Game;
+  prevGame?: Game;
   onViewLog: (logFile: string) => void | Promise<void>;
   onViewCapture: (gameId: number) => void | Promise<void>;
   key?: any;
 }) {
   const colorCls = RESULT_COLOR[game.result as GameResult] ?? "bg-gray-800 text-gray-300";
   const dt = new Date(game.recorded_at);
-  const dtStr = `${dt.getMonth() + 1}/${dt.getDate()} ${dt.getHours().toString().padStart(2,"0")}:${dt.getMinutes().toString().padStart(2,"0")}`;
+  const dtStr = `${dt.getMonth() + 1}/${dt.getDate()} ${dt.getHours().toString().padStart(2,"0")}:${dt.getMinutes().toString().padStart(2,"0")}:${dt.getSeconds().toString().padStart(2,"0")}`;
+
+  const elapsedSec = prevGame
+    ? Math.round((dt.getTime() - new Date(prevGame.recorded_at).getTime()) / 1000)
+    : null;
+  const elapsedStr = elapsedSec == null ? null
+    : elapsedSec < 60 ? `+${elapsedSec}s`
+    : `+${Math.floor(elapsedSec / 60)}m${elapsedSec % 60 > 0 ? `${elapsedSec % 60}s` : ""}`;
+  const elapsedCls = elapsedSec == null ? ""
+    : elapsedSec > 300 ? "text-red-500"
+    : elapsedSec > 60  ? "text-amber-500"
+    : "text-gray-600";
 
   return (
     <tr className="hover:bg-gray-800/50 transition">
@@ -997,7 +1010,12 @@ function GameRow({
       })()}
       <td className="px-3 py-1.5 text-gray-500 whitespace-nowrap">
         <div className="flex items-center gap-2">
-          <span>{dtStr}</span>
+          <div className="flex flex-col leading-tight">
+            <span>{dtStr}</span>
+            {elapsedStr && (
+              <span className={`text-[10px] ${elapsedCls}`}>{elapsedStr}</span>
+            )}
+          </div>
           {game.log_file_name && (
             <button
               onClick={() => onViewLog(game.log_file_name!)}
