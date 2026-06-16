@@ -8,6 +8,7 @@ interface LogFile {
   filename: string;
   size: number;
   mtime: number;
+  isErrorLog: boolean;
 }
 
 export default function AdminPage() {
@@ -15,8 +16,10 @@ export default function AdminPage() {
   const [adminPassword, setAdminPassword] = useState("");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [logs, setLogs] = useState<LogFile[]>([]);
+  const [showErrorLogsOnly, setShowErrorLogsOnly] = useState(false);
   const [selectedLogText, setSelectedLogText] = useState<string | null>(null);
   const [selectedLogTitle, setSelectedLogTitle] = useState("");
+  const [showErrorLinesOnly, setShowErrorLinesOnly] = useState(false);
   const [isLogModalOpen, setIsLogModalOpen] = useState(false);
   const [error, setError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
@@ -78,6 +81,7 @@ export default function AdminPage() {
 
   async function handleViewLog(filename: string) {
     setError("");
+    setShowErrorLinesOnly(false);
     try {
       const res = await fetch(`${API_URL}/api/v1/admin/logs/${filename}`, {
         headers: {
@@ -135,6 +139,17 @@ export default function AdminPage() {
     setIsAuthenticated(false);
     setLogs([]);
   }
+
+  const filteredLogs = showErrorLogsOnly
+    ? logs.filter((log) => log.isErrorLog)
+    : logs;
+
+  const visibleLogText = showErrorLinesOnly && selectedLogText
+    ? selectedLogText
+        .split("\n")
+        .filter((line) => /\[ERROR\]|error/i.test(line))
+        .join("\n")
+    : selectedLogText;
 
   function formatBytes(bytes: number) {
     if (bytes === 0) return "0 Bytes";
@@ -273,22 +288,40 @@ export default function AdminPage() {
 
         {/* ログ一覧 */}
         <section className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-          <div className="flex items-center justify-between border-b border-gray-800 px-4 py-3 bg-gray-900/50">
-            <h2 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
-              📂 OCR/システムログファイル ({logs.length}件)
-            </h2>
-            <button
-              onClick={() => fetchLogs(adminPassword)}
-              className="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 transition"
-            >
-              更新
-            </button>
+          <div className="flex flex-col gap-3 border-b border-gray-800 bg-gray-900/50 px-4 py-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
+                📂 OCR/システムログファイル ({filteredLogs.length} / {logs.length} 件)
+              </h2>
+              <p className="text-xs text-gray-500 mt-1">
+                エラーのみ表示は、ログ内容にエラー行が含まれるファイルを抽出します。
+              </p>
+            </div>
+            <div className="flex flex-col sm:flex-row sm:items-center sm:gap-2">
+              <label className="inline-flex items-center gap-2 text-xs text-gray-300 bg-gray-850 px-3 py-2 rounded-lg">
+                <input
+                  type="checkbox"
+                  checked={showErrorLogsOnly}
+                  onChange={(e) => setShowErrorLogsOnly(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-yellow-400 focus:ring-yellow-400"
+                />
+                エラーのみ表示
+              </label>
+              <button
+                onClick={() => fetchLogs(adminPassword)}
+                className="text-xs px-3 py-2 rounded bg-gray-800 hover:bg-gray-700 transition"
+              >
+                更新
+              </button>
+            </div>
           </div>
 
           <div className="overflow-x-auto">
-            {logs.length === 0 ? (
+            {filteredLogs.length === 0 ? (
               <div className="text-center text-gray-500 py-12 text-xs">
-                ログファイルが見つかりません。
+                {showErrorLogsOnly
+                  ? "エラー対象のログが見つかりません。"
+                  : "ログファイルが見つかりません。"}
               </div>
             ) : (
               <table className="min-w-full text-xs text-left">
@@ -301,9 +334,9 @@ export default function AdminPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800">
-                  {logs.map((log) => {
+                  {filteredLogs.map((log) => {
                     const date = new Date(log.mtime * 1000);
-                    const isErrorLog = log.filename.startsWith("error_");
+                    const isErrorLog = log.isErrorLog;
                     return (
                       <tr
                         key={log.filename}
@@ -347,19 +380,35 @@ export default function AdminPage() {
       {isLogModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
           <div className="bg-gray-950 border border-gray-800 rounded-xl max-w-4xl w-full max-h-[85vh] flex flex-col p-6 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-gray-800 pb-3">
-              <h3 className="text-sm font-semibold text-yellow-400 font-mono">
-                📄 Log Viewer: {selectedLogTitle}
-              </h3>
-              <button
-                onClick={() => setIsLogModalOpen(false)}
-                className="text-gray-500 hover:text-gray-300 transition text-xs font-semibold px-2.5 py-1 bg-gray-900 rounded border border-gray-800"
-              >
-                閉じる
-              </button>
+            <div className="flex flex-col gap-3 border-b border-gray-800 pb-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <h3 className="text-sm font-semibold text-yellow-400 font-mono">
+                  📄 Log Viewer: {selectedLogTitle}
+                </h3>
+                <p className="text-xs text-gray-500 mt-1">
+                  {showErrorLinesOnly ? "エラー行のみを表示しています。" : "ログ全体を表示しています。"}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="inline-flex items-center gap-2 text-xs text-gray-300 bg-gray-850 px-3 py-2 rounded-lg">
+                  <input
+                    type="checkbox"
+                    checked={showErrorLinesOnly}
+                    onChange={(e) => setShowErrorLinesOnly(e.target.checked)}
+                    className="h-4 w-4 rounded border-gray-700 bg-gray-800 text-yellow-400 focus:ring-yellow-400"
+                  />
+                  エラー行のみ表示
+                </label>
+                <button
+                  onClick={() => setIsLogModalOpen(false)}
+                  className="text-xs px-3 py-2 rounded bg-gray-800 hover:bg-gray-700 transition"
+                >
+                  閉じる
+                </button>
+              </div>
             </div>
             <pre className="overflow-auto text-xs text-gray-300 font-mono bg-black/50 p-4 rounded border border-gray-900/50 mt-4 flex-1 whitespace-pre-wrap select-text">
-              {selectedLogText || "ログの内容がありません"}
+              {visibleLogText || "ログの内容がありません"}
             </pre>
           </div>
         </div>

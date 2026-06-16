@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Header
 from fastapi.responses import FileResponse
 from pathlib import Path
 import os
+import re
 import shutil
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +34,15 @@ async def admin_login(x_admin_password: str = Header(None, alias="X-Admin-Passwo
     return {"status": "ok"}
 
 
+def _is_error_log_file(path: Path) -> bool:
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            text = f.read(32768)
+        return bool(re.search(r"\[ERROR\]|result\s*[:=]\s*['\"]error['\"]|\berror\b", text, re.IGNORECASE))
+    except Exception:
+        return False
+
+
 @router.get("/logs")
 async def list_admin_logs(
     _ : bool = Depends(verify_admin)
@@ -50,7 +60,8 @@ async def list_admin_logs(
                 logs.append({
                     "filename": p.name,
                     "size": stat.st_size,
-                    "mtime": stat.st_mtime
+                    "mtime": stat.st_mtime,
+                    "isErrorLog": _is_error_log_file(p),
                 })
         # 更新時間 (mtime) の降順 (最新順)
         logs.sort(key=lambda x: x["mtime"], reverse=True)

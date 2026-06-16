@@ -1166,6 +1166,8 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
         timer_active_value = 0                 # タイマーが有効だった時の値
         countdown_end_time = 0.0               # 結果チェック可能になる目標時刻
         result_phase_timer_streak = 0          # RESULT フェーズ中のタイマー連続検出回数
+        last_result_phase_timer_value: int | None = None  # RESULT フェーズ中の連続タイマー値
+        result_entered_at: float = 0.0        # RESULT フェーズに入った時刻（次ラウンド開始判定用）
         
         ocr_debug_list: list[str] = []      # OCR詳細デバッグログ
         log_file_name: str | None = None    # ログファイル名
@@ -1228,6 +1230,8 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                 timer_active_value = 0
                 countdown_end_time = 0.0
                 result_phase_timer_streak = 0
+                last_result_phase_timer_value = None
+                result_entered_at = 0.0
                 print(f"[INFO] クールダウン終了 → PREPARING")
                 if once:
                     break
@@ -1371,6 +1375,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                 if result is not None:
                     state = State.RESULT
                     result_detected_at = datetime.now(UTC).isoformat()
+                    result_entered_at = now
                     print(f"[INFO] 結果表示を検出 (BETTING → RESULT): result={result}  at={result_detected_at}")
                     result_streak = 1
                     last_streak_result = result
@@ -1378,25 +1383,53 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     send_preview_now = True  # 結果検出直後は即時プレビュー送信
 
             elif state == State.RESULT:
+                elapsed_in_result = now - result_entered_at
                 # 結果表示フェーズ中のタイマー誤検出に対するエラーハンドリング
                 if timer_value is not None and 1 <= timer_value <= 15:
-                    result_phase_timer_streak += 1
-                    print(
-                        f"[WARN] 結果表示フェーズ中にタイマー残り時間 {timer_value}s を検出 "
-                        f"({result_phase_timer_streak}/2)。OCR誤読の可能性があります。"
-                    )
-                    if result_phase_timer_streak >= 2:
-                        print("[WARN] タイマー連続検出により結果を強制的に 'error' として処理します。")
-                        result = "error"
+                    if elapsed_in_result >= 2.0:
+                        # 結果確定後2秒以上経過してタイマーを検出 → 次ラウンドが開始された
+                        print(
+                            f"[INFO] RESULT中にタイマー検出 ({timer_value}s, 経過:{elapsed_in_result:.1f}s): "
+                            f"次ラウンド開始と判断。result={last_streak_result} で確定します。"
+                        )
+                        result = last_streak_result
                         result_streak = result_stable_count
-                        last_streak_result = "error"
+                    else:
+                        # 入ってすぐタイマー検出 → OCR誤認識の可能性
+                        if timer_value == last_result_phase_timer_value:
+                            result_phase_timer_streak += 1
+                        else:
+                            result_phase_timer_streak = 1
+                            last_result_phase_timer_value = timer_value
+                        print(
+                            f"[WARN] 結果表示フェーズ中にタイマー残り時間 {timer_value}s を検出 "
+                            f"(経過:{elapsed_in_result:.1f}s, {result_phase_timer_streak}/2)。OCR誤読の可能性があります。"
+                        )
+                        if result_phase_timer_streak >= 2:
+                            print("[WARN] タイマー連続検出により結果を強制的に 'error' として処理します。")
+                            result = "error"
+                            result_streak = result_stable_count
+                            last_streak_result = "error"
                 elif result is None:
-                    # 結果が消失（前フレームの誤認識など）
-                    print("[WARN] 結果表示が消失しました。BETTING に戻ります。")
-                    state = State.BETTING
-                    result_streak = 0
-                    last_streak_result = None
+                    if elapsed_in_result >= 2.0:
+                        # 結果が消失したが2秒以上経過 → 次ラウンド開始として確定
+                        print(
+                            f"[INFO] RESULT中に結果消失 (経過:{elapsed_in_result:.1f}s): "
+                            f"次ラウンド開始と判断。result={last_streak_result} で確定します。"
+                        )
+                        result = last_streak_result
+                        result_streak = result_stable_count
+                    else:
+                        # 入ってすぐ消失 → 誤認識として BETTING に戻す
+                        print("[WARN] 結果表示が消失しました。BETTING に戻ります。")
+                        state = State.BETTING
+                        result_streak = 0
+                        last_streak_result = None
+                        result_phase_timer_streak = 0
+                        last_result_phase_timer_value = None
                 else:
+                    result_phase_timer_streak = 0
+                    last_result_phase_timer_value = None
                     if result == last_streak_result:
                         result_streak += 1
                     else:
@@ -1639,6 +1672,9 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     timer_active_last_seen = 0.0
                     timer_active_value = 0
                     countdown_end_time = 0.0
+                    result_phase_timer_streak = 0
+                    last_result_phase_timer_value = None
+                    result_entered_at = 0.0
 
                 time.sleep(poll_fast)
                 if once:
@@ -1790,6 +1826,8 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
             timer_active_value = 0
             countdown_end_time = 0.0
             result_phase_timer_streak = 0
+            last_result_phase_timer_value = None
+            result_entered_at = 0.0
             print(f"[INFO] → COOLDOWN ({post_round_cooldown}s)")
 
             if once:
