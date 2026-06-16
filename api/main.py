@@ -7,6 +7,7 @@ from routers.auth import router as auth_router
 from routers.capture import router as capture_router
 from routers.games import router as games_router
 from routers.admin import router as admin_router
+from routers.predictions import router as predictions_router
 
 app = FastAPI(title="Cowboy API")
 
@@ -22,6 +23,7 @@ app.include_router(auth_router)
 app.include_router(games_router)
 app.include_router(capture_router)
 app.include_router(admin_router)
+app.include_router(predictions_router)
 
 
 @app.get("/api/v1/health")

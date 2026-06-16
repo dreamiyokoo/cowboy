@@ -39,6 +39,8 @@ import numpy as np
 import pytesseract
 import yaml
 
+from predict import load_model, predict as ml_predict
+
 # EasyOCR はオプション: 未インストールの場合は None
 try:
     import easyocr as _easyocr
@@ -117,6 +119,12 @@ def save_round_log(capturer: LogCapturer, round_number: int | None) -> str:
 
 
 CONFIG_PATH = Path(__file__).parent / "config.yml"
+
+_prediction_model = load_model(Path(__file__).parent / "model.pkl")
+if _prediction_model is not None:
+    print(f"[INFO] 予測モデルをロード: {getattr(_prediction_model, '_model_version', 'unknown')}")
+else:
+    print("[INFO] 予測モデルなし（予測機能無効）")
 
 
 def load_config() -> dict:
@@ -1068,6 +1076,22 @@ def post_game(client: httpx.Client, base_url: str, token: str, data: dict) -> di
     return resp.json()
 
 
+def fetch_recent_games(client: httpx.Client, base_url: str, token: str, limit: int = 50) -> list[dict]:
+    """直近ゲーム履歴を取得する。タイムアウト 2秒。失敗時は空リストを返す。"""
+    try:
+        resp = client.get(
+            f"{base_url}/api/v1/games",
+            params={"limit": limit, "offset": 0},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=2.0,
+        )
+        resp.raise_for_status()
+        return resp.json().get("games", [])
+    except Exception as e:
+        print(f"[WARN] 直近ゲーム取得失敗: {e}", file=sys.stderr)
+        return []
+
+
 def post_capture_preview(client: httpx.Client, base_url: str, token: str, preview: dict) -> None:
     resp = client.post(
         f"{base_url}/api/v1/capture/preview",
@@ -1156,6 +1180,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
         BET_OCR_INTERVAL    = 3.0           # EasyOCR 実行間隔（秒）
         cached_jackpot_stock: int | None = None  # ジャックポットストックコイン
         cached_card_image: np.ndarray | None = None  # 初回/更新時に切り出したオープンカード画像
+        cached_prediction: dict | None = None         # ML予測キャッシュ
         bet_scanned_this_round = False
         round_number_scanned_this_round = False
         preview_last_sent   = 0.0           # プレビュー最終送信時刻
@@ -1220,6 +1245,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                 cached_bets = {k: None for k in ALL_BET_KEYS}
                 bet_last_updated = 0.0
                 cached_card_image = None
+                cached_prediction = None
                 bet_scanned_this_round = False
                 round_number_scanned_this_round = False
                 send_preview_now = True  # フロントの古いカード画像を即時クリアするため即時送信
@@ -1363,6 +1389,15 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                         if region.size > 0:
                             large_reg = cv2.resize(region, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
                             cached_card_image = enhance_card_image(large_reg)
+                        # ML予測（初回確定時のみ）
+                        if _prediction_model is not None:
+                            try:
+                                recent = fetch_recent_games(client, base_url, token, limit=50)
+                                cached_prediction = ml_predict(_prediction_model, card, recent, cached_jackpot_stock)
+                                print(f"[INFO] 予測: {cached_prediction}")
+                            except Exception as e:
+                                print(f"[WARN] 予測失敗: {e}", file=sys.stderr)
+                        send_preview_now = True
                     elif card != latest_open_card:
                         print(f"[INFO] オープンカード更新: {latest_open_card} → {card}")
                         y0, y1, x0, x1 = cap["open_card_crop"]
@@ -1518,6 +1553,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
 
                                     # 新しいラウンドのカード検出に備えて、オープンカード状態などをリセット
                                     latest_open_card = None
+                                    cached_prediction = None
                                     cached_bets = {k: None for k in ALL_BET_KEYS}
                                     bet_scanned_this_round = False
                                     round_number_scanned_this_round = False
@@ -1592,6 +1628,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     "result_scores": result_scores,
                     "winning_hand_scores": winning_hand_scores,
                     "jackpot_stock": cached_jackpot_stock,
+                    "prediction":          cached_prediction,
                     "timer_value":         latest_timer_value,
                     "timer_image":         encode_crop(img, cap["timer_crop"]) if "timer_crop" in cap else None,
                     # 全クロップ領域画像（座標チューニング確認用）
@@ -1664,6 +1701,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     # latest_round_number をリセットして BETTING 移行後の「ラウンド変更誤検知」を防ぐ
                     latest_round_number = None
                     latest_open_card = None
+                    cached_prediction = None
                     round_number_scanned_this_round = False
                     ocr_debug_list.clear()
                     log_file_name = None
@@ -1769,6 +1807,11 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                 "card_image":    card_image_b64,
                 "ocr_debug":     "\n".join(ocr_debug_list) if ocr_debug_list else None,
                 "log_file_name": log_file_name,
+                "pred_cowboy":   cached_prediction.get("cowboy")        if cached_prediction else None,
+                "pred_draw":     cached_prediction.get("draw")          if cached_prediction else None,
+                "pred_bull":     cached_prediction.get("bull")          if cached_prediction else None,
+                "pred_result":   cached_prediction.get("predicted")     if cached_prediction else None,
+                "model_version": cached_prediction.get("model_version") if cached_prediction else None,
             }
             try:
                 resp = post_game(client, base_url, token, payload)
@@ -1821,6 +1864,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
             open_detected_at = None
             result_detected_at = None
             cached_card_image = None
+            cached_prediction = None
             latest_timer_value = None
             timer_active_last_seen = 0.0
             timer_active_value = 0

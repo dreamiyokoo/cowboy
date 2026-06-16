@@ -1,0 +1,36 @@
+{
+  "model_type": "lgbm",
+  "model_version": "lgbm_v1",
+  "trained_at": "2026-06-16T19:44:31.742054",
+  "n_samples": 953,
+  "n_features": 32,
+  "cv_accuracy_mean": 0.4646,
+  "cv_accuracy_std": 0.0427,
+  "cv_log_loss_mean": 0.8217,
+  "train_accuracy": 1.0,
+  "train_log_loss": 0.1735,
+  "train_correct": 953,
+  "train_total": 953,
+  "train_confusion_matrix": [
+    [
+      468,
+      0,
+      0
+    ],
+    [
+      0,
+      35,
+      0
+    ],
+    [
+      0,
+      0,
+      450
+    ]
+  ],
+  "train_class_names": [
+    "cowboy",
+    "draw",
+    "bull"
+  ]
+}

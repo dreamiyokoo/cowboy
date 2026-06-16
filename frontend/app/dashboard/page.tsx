@@ -368,6 +368,9 @@ export default function DashboardPage() {
                 {!preview && (
                   <p className="text-gray-600 text-xs">プレビューデータがありません</p>
                 )}
+                {preview?.prediction && (
+                  <PredictionGauge prediction={preview.prediction} />
+                )}
               </div>
 
               {/* 主要クロップ画像（コンパクト） */}
@@ -676,6 +679,7 @@ export default function DashboardPage() {
                   <tr>
                     <Th>#</Th>
                     <Th>結果</Th>
+                    <Th>予測</Th>
                     <Th>R</Th>
                     <Th>オープン</Th>
                     <Th>JP</Th>
@@ -929,6 +933,21 @@ function GameRow({
           )}
         </div>
       </td>
+      <td className="px-3 py-1.5 text-center">
+        {game.pred_result ? (
+          <span title={`予測: ${game.pred_result} (${game.model_version ?? ""})`}>
+            <span className={game.pred_result === game.result ? "text-green-400" : "text-red-400"}>
+              {game.pred_result === game.result ? "✓" : "✗"}
+            </span>
+            {" "}
+            <span className="text-gray-400 text-xs">
+              {game.pred_result === "cowboy" ? "🤠" : game.pred_result === "bull" ? "🐂" : "🎲"}
+            </span>
+          </span>
+        ) : (
+          <span className="text-gray-700">—</span>
+        )}
+      </td>
       <td className="px-3 py-1.5 text-gray-400">
         {game.round_number ? (
           <button
@@ -1028,6 +1047,45 @@ function GameRow({
         </div>
       </td>
     </tr>
+  );
+}
+
+function PredictionGauge({ prediction }: {
+  prediction: {
+    cowboy: number;
+    draw: number;
+    bull: number;
+    predicted: "cowboy" | "draw" | "bull";
+    model_version: string;
+  };
+}) {
+  const entries: { key: "cowboy" | "draw" | "bull"; emoji: string; color: string }[] = [
+    { key: "cowboy", emoji: "🤠", color: "bg-red-600" },
+    { key: "bull",   emoji: "🐂", color: "bg-blue-600" },
+    { key: "draw",   emoji: "🎲", color: "bg-green-600" },
+  ];
+  return (
+    <div className="mt-2 border-t border-gray-700 pt-2 space-y-1">
+      <div className="text-xs text-gray-400 font-semibold mb-1">【予測】</div>
+      {entries.map(({ key, emoji, color }) => {
+        const pct = Math.round(prediction[key] * 100);
+        const isPredicted = prediction.predicted === key;
+        return (
+          <div key={key} className="flex items-center gap-2">
+            <span className="w-5 text-center text-sm">{emoji}</span>
+            <div className="flex-1 h-3 bg-gray-800 rounded-full overflow-hidden">
+              <div className={`h-full ${color} transition-all`} style={{ width: `${pct}%` }} />
+            </div>
+            <span className={`w-8 text-right text-xs font-mono ${isPredicted ? "text-yellow-300 font-bold" : "text-gray-400"}`}>
+              {pct}%
+            </span>
+          </div>
+        );
+      })}
+      <div className="text-xs text-yellow-400 mt-1">
+        → 予測: {prediction.predicted === "cowboy" ? "🤠 Cowboy" : prediction.predicted === "bull" ? "🐂 Bull" : "🎲 Draw"}
+      </div>
+    </div>
   );
 }
 

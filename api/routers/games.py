@@ -66,6 +66,13 @@ class GamePostRequest(BaseModel):
     # ラウンドログのファイル名
     log_file_name: str | None = None
 
+    # ML予測フィールド
+    pred_cowboy:   float | None = None
+    pred_draw:     float | None = None
+    pred_bull:     float | None = None
+    pred_result:   str | None   = None
+    model_version: str | None   = None
+
     @field_validator("cowboy_hand", "bull_hand")
     @classmethod
     def validate_hand_type(cls, v: int | None) -> int | None:
@@ -122,6 +129,11 @@ def _row_to_dict(row) -> dict:
     d["ocr_debug"] = row.ocr_debug
     d["log_file_name"] = row.log_file_name
     d["has_capture"] = Path(f"/app/logs/result_captures/{row.id}.jpg").exists()
+    d["pred_cowboy"]   = getattr(row, "pred_cowboy",   None)
+    d["pred_draw"]     = getattr(row, "pred_draw",     None)
+    d["pred_bull"]     = getattr(row, "pred_bull",     None)
+    d["pred_result"]   = getattr(row, "pred_result",   None)
+    d["model_version"] = getattr(row, "model_version", None)
     return d
 
 
@@ -152,7 +164,8 @@ async def post_game(
             "  bet_win_high, bet_win_two, bet_win_sf, bet_win_fh, bet_win_four,"
             "  win_any_flash, win_any_pair, win_any_ace,"
             "  win_high, win_two, win_sf, win_fh, win_four,"
-            "  card_image, ocr_debug, log_file_name"
+            "  card_image, ocr_debug, log_file_name,"
+            "  pred_cowboy, pred_draw, pred_bull, pred_result, model_version"
             ") VALUES ("
             "  :open_card, :result, :cowboy_hand, :bull_hand, :round_number, :jackpot_stock,"
             "  :bet_cowboy, :bet_draw, :bet_bull,"
@@ -160,7 +173,8 @@ async def post_game(
             "  :bet_win_high, :bet_win_two, :bet_win_sf, :bet_win_fh, :bet_win_four,"
             "  :win_any_flash, :win_any_pair, :win_any_ace,"
             "  :win_high, :win_two, :win_sf, :win_fh, :win_four,"
-            "  :card_image, :ocr_debug, :log_file_name"
+            "  :card_image, :ocr_debug, :log_file_name,"
+            "  :pred_cowboy, :pred_draw, :pred_bull, :pred_result, :model_version"
             ") RETURNING "
             "  id, open_card, result, cowboy_hand, bull_hand, round_number, recorded_at,"
             "  jackpot_stock,"
@@ -169,7 +183,8 @@ async def post_game(
             "  bet_win_high, bet_win_two, bet_win_sf, bet_win_fh, bet_win_four,"
             "  win_any_flash, win_any_pair, win_any_ace,"
             "  win_high, win_two, win_sf, win_fh, win_four,"
-            "  card_image, ocr_debug, log_file_name"
+            "  card_image, ocr_debug, log_file_name,"
+            "  pred_cowboy, pred_draw, pred_bull, pred_result, model_version"
         ),
         {
             "open_card": body.open_card, "result": body.result,
@@ -183,6 +198,8 @@ async def post_game(
             "win_high": body.win_high, "win_two": body.win_two, "win_sf": body.win_sf,
             "win_fh": body.win_fh, "win_four": body.win_four,
             "card_image": body.card_image, "ocr_debug": body.ocr_debug, "log_file_name": body.log_file_name,
+            "pred_cowboy": body.pred_cowboy, "pred_draw": body.pred_draw, "pred_bull": body.pred_bull,
+            "pred_result": body.pred_result, "model_version": body.model_version,
         },
     )
     row = inserted.fetchone()
@@ -206,7 +223,8 @@ async def get_games(
             "       bet_win_high, bet_win_two, bet_win_sf, bet_win_fh, bet_win_four,"
             "       win_any_flash, win_any_pair, win_any_ace,"
             "       win_high, win_two, win_sf, win_fh, win_four,"
-            "       card_image, ocr_debug, log_file_name "
+            "       card_image, ocr_debug, log_file_name,"
+            "       pred_cowboy, pred_draw, pred_bull, pred_result, model_version "
             "FROM games ORDER BY recorded_at DESC, id DESC "
             "LIMIT :limit OFFSET :offset"
         ),

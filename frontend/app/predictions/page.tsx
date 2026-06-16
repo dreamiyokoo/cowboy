@@ -9,8 +9,10 @@ import {
 } from "@/app/lib/auth";
 import {
   fetchGames,
+  fetchPredictionAccuracy,
   type Game,
   type GameResult,
+  type PredictionAccuracyResponse,
 } from "@/app/lib/api";
 
 type TabId = "validation" | "cards" | "spec";
@@ -21,6 +23,7 @@ export default function PredictionsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState<TabId>("validation");
+  const [predAccuracy, setPredAccuracy] = useState<PredictionAccuracyResponse | null>(null);
 
   // Dynamic stats
   const [stats, setStats] = useState({
@@ -67,12 +70,21 @@ export default function PredictionsPage() {
           allGames = allGames.concat(res.games);
         }
       });
-      
+
       // Sort desc by recorded_at
       allGames.sort((a, b) => new Date(b.recorded_at).getTime() - new Date(a.recorded_at).getTime());
-      
+
       setGames(allGames);
       calculateStats(allGames);
+
+      // 予測精度データ取得
+      try {
+        const acc = await fetchPredictionAccuracy(token);
+        setPredAccuracy(acc);
+      } catch {
+        // 予測データなしは無視
+      }
+
       setError("");
     } catch (e: any) {
       if (e.status === 401) {
@@ -440,6 +452,91 @@ export default function PredictionsPage() {
                       </div>
                     )}
                   </div>
+                </div>
+
+                {/* ML Prediction Accuracy */}
+                <div className="bg-gray-900/40 border border-gray-800 rounded-xl p-6 space-y-4">
+                  <h3 className="text-md font-bold text-yellow-500 flex items-center gap-2">
+                    <span>🤖</span> ML予測精度レポート
+                  </h3>
+
+                  {!predAccuracy || predAccuracy.total_predicted === 0 ? (
+                    <div className="bg-gray-950/50 border border-gray-800/50 rounded-lg p-6 text-center text-gray-400 text-sm">
+                      まだ予測データがありません。<br />
+                      <span className="text-xs text-gray-500 mt-1 block">モデルを学習してキャプチャを開始すると、ここに精度が表示されます。</span>
+                    </div>
+                  ) : (
+                    <div className="space-y-5">
+                      {/* Overall accuracy */}
+                      <div className="flex items-center gap-4 bg-gray-950/50 p-4 rounded border border-gray-800/50">
+                        <div className="text-center min-w-[80px]">
+                          <p className="text-3xl font-black text-yellow-400">
+                            {predAccuracy.accuracy != null ? (predAccuracy.accuracy * 100).toFixed(1) : "—"}%
+                          </p>
+                          <p className="text-xs text-gray-500 mt-1">全体正解率</p>
+                        </div>
+                        <div className="flex-1 text-xs text-gray-400">
+                          <span className="text-gray-300 font-semibold">{predAccuracy.total_predicted}件</span>の予測データを集計しました。
+                          全体正解率はランダム予測（約33%）と比較して評価してください。
+                        </div>
+                      </div>
+
+                      {/* Per-class accuracy */}
+                      <div className="grid grid-cols-3 gap-3">
+                        {(
+                          [
+                            { key: "cowboy", label: "カウボーイ予測時", color: "text-red-400", border: "border-red-900/30", bg: "bg-red-950/20" },
+                            { key: "bull",   label: "ブル予測時",       color: "text-blue-400",  border: "border-blue-900/30",  bg: "bg-blue-950/20" },
+                            { key: "draw",   label: "抽選予測時",       color: "text-green-400", border: "border-green-900/30", bg: "bg-green-950/20" },
+                          ] as const
+                        ).map(({ key, label, color, border, bg }) => {
+                          const cls = predAccuracy.by_predicted[key];
+                          return (
+                            <div key={key} className={`${bg} ${border} border rounded-xl p-4 text-center space-y-1`}>
+                              <p className={`text-2xl font-black ${color}`}>
+                                {cls.accuracy != null ? (cls.accuracy * 100).toFixed(1) : "—"}%
+                              </p>
+                              <p className="text-xs text-gray-400">{label}</p>
+                              <p className="text-xs text-gray-500">{cls.correct}/{cls.total}件</p>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Confusion matrix */}
+                      {Object.keys(predAccuracy.confusion).length > 0 && (
+                        <div>
+                          <p className="text-xs text-gray-400 font-semibold mb-2">混同行列（予測 → 実際）</p>
+                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                            {Object.entries(predAccuracy.confusion).map(([key, count]) => {
+                              const [predPart, actualPart] = key.split("_pred_");
+                              const actual = actualPart?.replace("_actual", "") ?? "";
+                              const isCorrect = predPart === actual;
+                              return (
+                                <div
+                                  key={key}
+                                  className={`text-xs rounded p-2 border ${
+                                    isCorrect
+                                      ? "bg-green-950/20 border-green-900/40 text-green-400"
+                                      : "bg-gray-950/50 border-gray-800/50 text-gray-400"
+                                  }`}
+                                >
+                                  <span className="font-mono">{predPart} → {actual}</span>
+                                  <span className="float-right font-bold">{count}件</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Draw note */}
+                      <div className="bg-green-950/10 border border-green-900/20 rounded-lg p-3 text-xs text-green-400/80 leading-relaxed">
+                        <strong>補足:</strong> 抽選 (draw) は出現率が低い（5〜10%前後）ため、クラス不均衡により正解率が理論上低くなります。
+                        draw の正解率の低さは学習の失敗ではなく、確率的に難しいクラスであることを意味します。
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}

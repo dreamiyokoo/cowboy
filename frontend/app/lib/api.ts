@@ -23,6 +23,13 @@ export interface CapturePreview {
   timer_image?: string | null;
   game_state?: "result" | "betting" | "preparing" | "cooldown" | "unknown";
   remaining_seconds?: number | null;
+  prediction?: {
+    cowboy: number;
+    draw: number;
+    bull: number;
+    predicted: "cowboy" | "draw" | "bull";
+    model_version: string;
+  } | null;
 }
 
 // ── 型定義 ─────────────────────────────────────────────
@@ -68,6 +75,12 @@ export interface Game {
   ocr_debug?: string | null;
   log_file_name?: string | null;
   has_capture?: boolean;
+  // ML予測
+  pred_cowboy?: number | null;
+  pred_draw?: number | null;
+  pred_bull?: number | null;
+  pred_result?: "cowboy" | "draw" | "bull" | null;
+  model_version?: string | null;
 }
 
 export interface GamesResponse {
@@ -110,6 +123,23 @@ export interface CardStatsItem {
 
 export interface CardStatsResponse {
   card_stats: CardStatsItem[];
+}
+
+export interface PredictionClassStats {
+  total: number;
+  correct: number;
+  accuracy: number | null;
+}
+
+export interface PredictionAccuracyResponse {
+  total_predicted: number;
+  accuracy: number | null;
+  by_predicted: {
+    cowboy: PredictionClassStats;
+    draw: PredictionClassStats;
+    bull: PredictionClassStats;
+  };
+  confusion: Record<string, number>;
 }
 
 // ── API クライアント ───────────────────────────────────
@@ -166,6 +196,14 @@ export async function fetchCapturePreview(token: string): Promise<CapturePreview
 
 export async function fetchCardStats(token: string): Promise<CardStatsResponse> {
   return apiFetch<CardStatsResponse>("/api/v1/games/card-stats", token);
+}
+
+export async function fetchPredictionAccuracy(
+  token: string,
+  modelVersion?: string
+): Promise<PredictionAccuracyResponse> {
+  const qs = modelVersion ? `?model_version=${encodeURIComponent(modelVersion)}` : "";
+  return apiFetch<PredictionAccuracyResponse>(`/api/v1/predictions/accuracy${qs}`, token);
 }
 
 export async function fetchCardStatSingle(
