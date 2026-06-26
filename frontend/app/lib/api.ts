@@ -30,6 +30,16 @@ export interface CapturePreview {
     predicted: "cowboy" | "draw" | "bull";
     model_version: string;
   } | null;
+  side_bet_prediction?: {
+    any_flash: number | null;
+    any_pair: number | null;
+    any_ace: number | null;
+    win_high: number | null;
+    win_two: number | null;
+    win_sf: number | null;
+    win_fh: number | null;
+    win_four: number | null;
+  } | null;
 }
 
 // ── 型定義 ─────────────────────────────────────────────
@@ -142,6 +152,33 @@ export interface PredictionAccuracyResponse {
   confusion: Record<string, number>;
 }
 
+export interface PredictionRoiClassStats {
+  total: number;
+  correct: number;
+  bet_total: number;
+  payout: number;
+  roi: number | null;
+}
+
+export interface PredictionRoiResponse {
+  total: number;
+  total_with_bets: number;
+  overall_roi: number | null;
+  cumulative_pnl: { recorded_at: string; pnl: number; cumulative: number }[];
+  by_predicted: {
+    cowboy: PredictionRoiClassStats;
+    draw: PredictionRoiClassStats;
+    bull: PredictionRoiClassStats;
+  };
+}
+
+export interface PredictionStreaksResponse {
+  total: number;
+  current_miss_streak: number;
+  max_miss_streak: number;
+  streak_history: { streak: number; from: string; to: string }[];
+}
+
 // ── API クライアント ───────────────────────────────────
 
 declare const process: { env: { NEXT_PUBLIC_API_URL?: string } };
@@ -204,6 +241,92 @@ export async function fetchPredictionAccuracy(
 ): Promise<PredictionAccuracyResponse> {
   const qs = modelVersion ? `?model_version=${encodeURIComponent(modelVersion)}` : "";
   return apiFetch<PredictionAccuracyResponse>(`/api/v1/predictions/accuracy${qs}`, token);
+}
+
+export async function fetchPredictionRoi(
+  token: string,
+  confidence?: number
+): Promise<PredictionRoiResponse> {
+  const qs = confidence ? `?confidence=${confidence}` : "";
+  return apiFetch<PredictionRoiResponse>(`/api/v1/predictions/roi${qs}`, token);
+}
+
+export interface IntervalBucket {
+  label: string;
+  from: number;
+  to: number | null;
+  count: number;
+}
+
+export interface IntervalCategoryStats {
+  label: string;
+  odds: number;
+  count: number;
+  mean_interval: number | null;
+  median_interval: number | null;
+  p75_interval: number | null;
+  max_interval: number | null;
+  current_gap: number;
+  histogram: IntervalBucket[];
+}
+
+export interface GameIntervalsResponse {
+  total_games: number;
+  categories: Record<string, IntervalCategoryStats>;
+}
+
+export async function fetchGameIntervals(token: string): Promise<GameIntervalsResponse> {
+  return apiFetch<GameIntervalsResponse>("/api/v1/games/intervals", token);
+}
+
+export interface ArchiveRecord {
+  period: string;
+  game_count: number;
+  cowboy: number;
+  bull: number;
+  draw: number;
+  cowboy_rate: number | null;
+  bull_rate: number | null;
+  draw_rate: number | null;
+  total_bet: number;
+  total_payout: number;
+  pnl: number;
+  win_any_flash: number;
+  win_any_pair: number;
+  win_any_ace: number;
+  win_high: number;
+  win_two: number;
+  win_sf: number;
+  win_fh: number;
+  win_four: number;
+}
+
+export interface GamesArchiveResponse {
+  by: "day" | "hour";
+  records: ArchiveRecord[];
+}
+
+export async function fetchGamesArchive(
+  token: string,
+  by: "day" | "hour" = "day",
+  tzOffset = 9
+): Promise<GamesArchiveResponse> {
+  return apiFetch<GamesArchiveResponse>(
+    `/api/v1/games/archive?by=${by}&tz_offset=${tzOffset}`,
+    token
+  );
+}
+
+export async function fetchPredictionStreaks(
+  token: string,
+  fromDate?: string,
+  toDate?: string
+): Promise<PredictionStreaksResponse> {
+  const params = new URLSearchParams();
+  if (fromDate) params.set("from_date", fromDate);
+  if (toDate) params.set("to_date", toDate);
+  const qs = params.toString() ? `?${params}` : "";
+  return apiFetch<PredictionStreaksResponse>(`/api/v1/predictions/streaks${qs}`, token);
 }
 
 export async function fetchCardStatSingle(

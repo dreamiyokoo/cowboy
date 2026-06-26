@@ -125,3 +125,12 @@ timing:
   # result_check_delay(15) + 結果表示時間(5) + 余裕(10) = 30
   # 1ラウンド≈25sのため45sは長すぎてラウンドをまたいでしまう
   result_timeout: 30
+
+# フレームハング検出設定
+hang_detect:
+  # 同じフレームが何回連続したらハング判定するか（threshold回）
+  threshold: 5
+
+  # ハング判定の時間ウィンドウ（秒）
+  # この時間以上前のフレーム履歴は破棄される
+  timeout_seconds: 10

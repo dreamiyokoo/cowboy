@@ -39,7 +39,7 @@ import numpy as np
 import pytesseract
 import yaml
 
-from predict import load_model, predict as ml_predict
+from predict import load_model, predict as ml_predict, load_side_bet_models, predict_side_bets
 
 # EasyOCR はオプション: 未インストールの場合は None
 try:
@@ -126,6 +126,13 @@ if _prediction_model is not None:
 else:
     print("[INFO] 予測モデルなし（予測機能無効）")
 
+_side_bet_models = load_side_bet_models(Path(__file__).parent / "side_bet_models.pkl")
+if _side_bet_models is not None:
+    loaded = [k for k, v in _side_bet_models.items() if v is not None]
+    print(f"[INFO] サイドベットモデルをロード: {loaded}")
+else:
+    print("[INFO] サイドベットモデルなし")
+
 
 def load_config() -> dict:
     with open(CONFIG_PATH) as f:
@@ -211,6 +218,83 @@ def take_screenshot(device: str) -> np.ndarray | None:
     except subprocess.TimeoutExpired:
         print("[WARN] screencap timed out", file=sys.stderr)
         return None
+
+
+# ────────────────────────────────────────────────
+# フレーム差分チェック（ハング検出）
+# ────────────────────────────────────────────────
+
+def compute_frame_hash(img: np.ndarray) -> str:
+    """フレーム画像の簡易ハッシュを計算（高速）。リサイズして縮小ハッシュを生成。"""
+    if img is None or img.size == 0:
+        return "none"
+    try:
+        # 小さくリサイズしてからハッシュ計算（高速化）
+        small = cv2.resize(img, (64, 64), interpolation=cv2.INTER_AREA)
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        # numpy array をバイナリ化してハッシュ
+        import hashlib
+        return hashlib.md5(gray.tobytes()).hexdigest()
+    except Exception as e:
+        print(f"[WARN] compute_frame_hash failed: {e}", file=sys.stderr)
+        return "error"
+
+
+class FrameHangDetector:
+    """連続フレーム間で差分がない場合をハング判定する"""
+    def __init__(self, threshold: int = 5, timeout_seconds: int = 10):
+        """
+        threshold: 同じフレームが何回連続したらハング判定するか
+        timeout_seconds: ハング判定の時間ウィンドウ
+        """
+        self.threshold = threshold
+        self.timeout_seconds = timeout_seconds
+        self.frame_history: list[tuple[str, float]] = []  # (hash, timestamp) のリスト
+        self.hang_detected_at: float | None = None
+        self.last_frame_hash: str | None = None
+
+    def check(self, img: np.ndarray, current_time: float) -> bool:
+        """
+        フレーム差分をチェック。同じフレームが threshold 回以上続いたら True を返す。
+        ハングが検出済みの場合は、timeout_seconds を超えるまで True を返し続ける（リセット待機）
+        """
+        # クリーンアップ：古い履歴を削除
+        self.frame_history = [
+            (h, t) for h, t in self.frame_history
+            if current_time - t < self.timeout_seconds
+        ]
+
+        frame_hash = compute_frame_hash(img)
+        self.frame_history.append((frame_hash, current_time))
+
+        # ハング検出中：timeout_seconds を超えるまで True を返す
+        if self.hang_detected_at is not None:
+            if current_time - self.hang_detected_at > self.timeout_seconds:
+                # タイムアウト経過 → リセット
+                self.hang_detected_at = None
+                self.frame_history.clear()
+                self.last_frame_hash = None
+                return False
+            else:
+                return True
+
+        # ハング判定：同じハッシュが threshold 回以上連続
+        if len(self.frame_history) >= self.threshold:
+            recent_hashes = [h for h, _ in self.frame_history[-self.threshold:]]
+            if len(set(recent_hashes)) == 1 and recent_hashes[0] != "none":
+                # 全て同じハッシュ（かつ valid）
+                self.hang_detected_at = current_time
+                print(f"[WARN] フレームハング検出: {self.threshold}フレーム同一 (hash={recent_hashes[0][:8]}...)")
+                return True
+
+        self.last_frame_hash = frame_hash
+        return False
+
+    def reset(self):
+        """ハング検出状態をリセット"""
+        self.frame_history.clear()
+        self.hang_detected_at = None
+        self.last_frame_hash = None
 
 
 # ────────────────────────────────────────────────
@@ -303,7 +387,7 @@ def _save_result_capture(game_id: int, img: np.ndarray) -> None:
 
 def detect_result(img: np.ndarray, crop: list[int], debug: bool = False) -> str | None:
     """
-    結果ボタン行を3分割し、WIN バッジ（非常に明るいピクセルが集中する）が
+    結果ボタン行を3分割し、WIN バッジ（V > 220 が最も集中する）が
     どのセクションにあるかで勝者を判定する。
 
     ボタン配置（左→右）:
@@ -311,9 +395,9 @@ def detect_result(img: np.ndarray, crop: list[int], debug: bool = False) -> str 
       中1/3 → 抽選         (draw)
       右1/3 → ノルの勝利   (bull)
 
-    「WIN バッジ」は他セクションより明らかに明るいため、
-    V チャンネル > 220 のピクセル比率でスコアリングする。
-    max スコア < BRIGHT_THRESHOLD → まだ結果表示前 → None を返す
+    detect_winning_hand と同じ判定方式を採用:
+      - V > 220 のピクセル比率でスコアリング（彩度条件なし）
+      - max >= 0.28 かつ 2位の 1.5 倍以上 → 確定
     """
     y0, y1, x0, x1 = crop
     region = img[y0:y1, x0:x1]
@@ -332,29 +416,22 @@ def detect_result(img: np.ndarray, crop: list[int], debug: bool = False) -> str 
     scores: dict[str, float] = {}
     for name, sec in sections.items():
         hsv = cv2.cvtColor(sec, cv2.COLOR_BGR2HSV)
-        # V > 220 (非常に明るい) かつ S > 70 (白色文字や無色チップを除外するため鮮やか) なピクセルの比率
-        mask = (hsv[:, :, 2] > 220) & (hsv[:, :, 1] > 70)
-        bright = float(np.count_nonzero(mask)) / (sec.shape[0] * sec.shape[1])
+        bright = float(np.count_nonzero(hsv[:, :, 2] > 220)) / (sec.shape[0] * sec.shape[1])
         scores[name] = bright
 
     if debug:
-        print(f"[DEBUG] result brightness (saturated): {scores}")
+        print(f"[DEBUG] result brightness: {scores}")
         cv2.imwrite("/tmp/cowboy_result_region.png", region)
-
-    # 鮮やかな WIN バッジが表示されているセクションはある程度の輝度が必要
-    # かつ他セクションに比べて明らかに優勢であることを確認する（誤検出防止）
-    BRIGHT_THRESHOLD = 0.25
-    DOMINANCE_DELTA = 0.06  # 2位との差がこの値以上なら確定
 
     sorted_scores = sorted(scores.values(), reverse=True)
     max_score = sorted_scores[0]
     second_score = sorted_scores[1] if len(sorted_scores) > 1 else 0.0
 
-    if max_score < BRIGHT_THRESHOLD:
+    if max_score < 0.28:
         return None
 
-    # 支配度チェック: 最大値が十分に2位より大きいこと
-    if (max_score - second_score) < DOMINANCE_DELTA:
+    # 2位の 1.5 倍以上なければ曖昧として棄却（detect_winning_hand と同じ基準）
+    if second_score > 0 and max_score < second_score * 1.5:
         if debug:
             print(f"[DEBUG] result ambiguous: max={max_score:.3f}, 2nd={second_score:.3f} -> reject")
         return None
@@ -1121,6 +1198,11 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
     result_timeout      = float(timing["result_timeout"])        # デフォルト 25s
     result_check_delay  = float(timing.get("result_check_delay", 12.0))  # デフォルト 12s
 
+    # ハング検出設定
+    hang_detect_cfg = cfg.get("hang_detect", {})
+    hang_threshold  = int(hang_detect_cfg.get("threshold", 5))
+    hang_timeout    = float(hang_detect_cfg.get("timeout_seconds", 10.0))
+
     if not username or not password:
         print(
             "[ERROR] username/password が設定されていません。"
@@ -1181,6 +1263,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
         cached_jackpot_stock: int | None = None  # ジャックポットストックコイン
         cached_card_image: np.ndarray | None = None  # 初回/更新時に切り出したオープンカード画像
         cached_prediction: dict | None = None         # ML予測キャッシュ
+        cached_side_bet_pred: dict | None = None      # サイドベット予測キャッシュ
         bet_scanned_this_round = False
         round_number_scanned_this_round = False
         preview_last_sent   = 0.0           # プレビュー最終送信時刻
@@ -1193,15 +1276,19 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
         result_phase_timer_streak = 0          # RESULT フェーズ中のタイマー連続検出回数
         last_result_phase_timer_value: int | None = None  # RESULT フェーズ中の連続タイマー値
         result_entered_at: float = 0.0        # RESULT フェーズに入った時刻（次ラウンド開始判定用）
-        
+        cached_result_image: np.ndarray | None = None  # 初回結果検出時のフレームキャッシュ
+
         ocr_debug_list: list[str] = []      # OCR詳細デバッグログ
         log_file_name: str | None = None    # ログファイル名
         capturer.reset()                    # ログバッファ初期化
+        hang_detector = FrameHangDetector(threshold=hang_threshold, timeout_seconds=hang_timeout)  # フレームハング検出
  
         print(f"[INFO] ステートマシン開始: state={state.value}")
         print(f"[INFO] タイミング設定: cooldown={post_round_cooldown}s  "
               f"poll_fast={poll_fast}s  stable_count={result_stable_count}  "
               f"timeout={result_timeout}s")
+        print(f"[INFO] ハング検出設定: threshold={hang_threshold}フレーム  "
+              f"timeout_window={hang_timeout}s")
  
         while True:
             # ── JWT 24時間で再取得 ────────────────────────────
@@ -1246,6 +1333,8 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                 bet_last_updated = 0.0
                 cached_card_image = None
                 cached_prediction = None
+                cached_side_bet_pred = None
+                recent_games_cache = None
                 bet_scanned_this_round = False
                 round_number_scanned_this_round = False
                 send_preview_now = True  # フロントの古いカード画像を即時クリアするため即時送信
@@ -1258,6 +1347,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                 result_phase_timer_streak = 0
                 last_result_phase_timer_value = None
                 result_entered_at = 0.0
+                hang_detector.reset()  # フレームハング検出器をリセット
                 print(f"[INFO] クールダウン終了 → PREPARING")
                 if once:
                     break
@@ -1274,12 +1364,64 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     break
                 continue
 
+            # ── フレームハング検出（同じ画像が連続して返されていないか） ──
+            if hang_detector.check(img, now):
+                print(
+                    f"[WARN] フレームハングを検出しました。"
+                    "画面が固まっているか、ADB接続が不安定である可能性があります。"
+                )
+                log_file_name = save_round_log(capturer, latest_round_number)
+                
+                # ハング検出時はエラーPOST
+                if latest_open_card is not None or latest_round_number is not None:
+                    error_payload = {
+                        "open_card": latest_open_card,
+                        "result": "error",
+                        "cowboy_hand": None,
+                        "bull_hand": None,
+                        "round_number": latest_round_number,
+                        "jackpot_stock": cached_jackpot_stock,
+                        "bet_cowboy":    cached_bets.get("cowboy"),
+                        "bet_draw":      cached_bets.get("draw"),
+                        "bet_bull":      cached_bets.get("bull"),
+                        "bet_any_flash": cached_bets.get("any_flash"),
+                        "bet_any_pair":  cached_bets.get("any_pair"),
+                        "bet_any_ace":   cached_bets.get("any_ace"),
+                        "bet_win_high":  cached_bets.get("win_high"),
+                        "bet_win_two":   cached_bets.get("win_two"),
+                        "bet_win_sf":    cached_bets.get("win_sf"),
+                        "bet_win_fh":    cached_bets.get("win_fh"),
+                        "bet_win_four":  cached_bets.get("win_four"),
+                        "card_image":    encode_crop(img, cap["open_card_crop"], scale=4) if latest_open_card else None,
+                        "ocr_debug":     "\n".join(ocr_debug_list) if ocr_debug_list else None,
+                        "log_file_name": log_file_name,
+                    }
+                    try:
+                        post_game(client, base_url, token, error_payload)
+                        print(f"[INFO] フレームハング検出のエラー POST に成功しました。")
+                    except Exception as e:
+                        print(f"[ERROR] フレームハング検出のエラー POST に失敗: {e}", file=sys.stderr)
+                    
+                    if latest_round_number is not None:
+                        last_confirmed_round = latest_round_number
+                        last_confirmed_time = time.time()
+                
+                # COOLDOWN に入る
+                state = State.COOLDOWN
+                cooldown_start = now
+                print(f"[INFO] クールダウンに入ります ({post_round_cooldown}秒)")
+                if once:
+                    break
+                continue
+
             # ── カード裏面（緑）の判定と解析 ──
             is_green = is_card_back_green(img, cap["open_card_crop"])
 
             # ── タイマー検出 ──
+            # RESULT 状態中はタイマー OCR をスキップ（EasyOCR が重くポーリングを阻害するため）
+            # 次ラウンド開始の判定は result=None 後の経過時間で行う
             timer_value = None
-            if "timer_crop" in cap:
+            if "timer_crop" in cap and state != State.RESULT:
                 timer_value = detect_timer(img, cap["timer_crop"], debug=debug)
                 if timer_value is not None:
                     if timer_value != latest_timer_value:
@@ -1354,6 +1496,18 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     if card:
                         latest_open_card = card
                         print(f"[INFO] オープンカード初回検出: {card}")
+                        if _prediction_model is not None or _side_bet_models is not None:
+                            try:
+                                recent = fetch_recent_games(client, base_url, token, limit=50)
+                                recent_games_cache = recent
+                                if _prediction_model is not None:
+                                    cached_prediction = ml_predict(_prediction_model, card, recent, cached_jackpot_stock)
+                                    print(f"[INFO] 予測: {cached_prediction}")
+                                if _side_bet_models is not None:
+                                    cached_side_bet_pred = predict_side_bets(_side_bet_models, card, recent, cached_jackpot_stock)
+                                    print(f"[INFO] サイドベット予測: {cached_side_bet_pred}")
+                            except Exception as e:
+                                print(f"[WARN] 予測失敗: {e}", file=sys.stderr)
                 # フォールバック: カードオープン検知（タイマーOCRが失敗し、緑でなくなった場合）
                 elif not is_green:
                     state = State.BETTING
@@ -1390,11 +1544,15 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                             large_reg = cv2.resize(region, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
                             cached_card_image = enhance_card_image(large_reg)
                         # ML予測（初回確定時のみ）
-                        if _prediction_model is not None:
+                        if _prediction_model is not None or _side_bet_models is not None:
                             try:
                                 recent = fetch_recent_games(client, base_url, token, limit=50)
-                                cached_prediction = ml_predict(_prediction_model, card, recent, cached_jackpot_stock)
-                                print(f"[INFO] 予測: {cached_prediction}")
+                                recent_games_cache = recent
+                                if _prediction_model is not None:
+                                    cached_prediction = ml_predict(_prediction_model, card, recent, cached_jackpot_stock)
+                                    print(f"[INFO] 予測: {cached_prediction}")
+                                if _side_bet_models is not None:
+                                    cached_side_bet_pred = predict_side_bets(_side_bet_models, card, recent, cached_jackpot_stock)
                             except Exception as e:
                                 print(f"[WARN] 予測失敗: {e}", file=sys.stderr)
                         send_preview_now = True
@@ -1415,6 +1573,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     result_streak = 1
                     last_streak_result = result
                     result_phase_timer_streak = 0
+                    cached_result_image = img.copy()  # 初回検出フレームを保存
                     send_preview_now = True  # 結果検出直後は即時プレビュー送信
 
             elif state == State.RESULT:
@@ -1423,11 +1582,20 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                 if timer_value is not None and 1 <= timer_value <= 15:
                     if elapsed_in_result >= 2.0:
                         # 結果確定後2秒以上経過してタイマーを検出 → 次ラウンドが開始された
-                        print(
-                            f"[INFO] RESULT中にタイマー検出 ({timer_value}s, 経過:{elapsed_in_result:.1f}s): "
-                            f"次ラウンド開始と判断。result={last_streak_result} で確定します。"
-                        )
-                        result = last_streak_result
+                        # 1回しか検出できていない場合は誤検知の可能性があるため error 扱い
+                        if result_streak < 2:
+                            print(
+                                f"[WARN] RESULT中にタイマー検出 ({timer_value}s, 経過:{elapsed_in_result:.1f}s): "
+                                f"result_streak={result_streak} (未確認) のため error として処理します。"
+                            )
+                            result = "error"
+                            last_streak_result = "error"
+                        else:
+                            print(
+                                f"[INFO] RESULT中にタイマー検出 ({timer_value}s, 経過:{elapsed_in_result:.1f}s): "
+                                f"次ラウンド開始と判断。result={last_streak_result} で確定します。"
+                            )
+                            result = last_streak_result
                         result_streak = result_stable_count
                     else:
                         # 入ってすぐタイマー検出 → OCR誤認識の可能性
@@ -1447,7 +1615,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                             last_streak_result = "error"
                 elif result is None:
                     if elapsed_in_result >= 2.0:
-                        # 結果が消失したが2秒以上経過 → 次ラウンド開始として確定
+                        # 結果が消失したが2秒以上経過している場合は、次ラウンド開始と判断して結果を確定する
                         print(
                             f"[INFO] RESULT中に結果消失 (経過:{elapsed_in_result:.1f}s): "
                             f"次ラウンド開始と判断。result={last_streak_result} で確定します。"
@@ -1472,14 +1640,35 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                         last_streak_result = result
                     print(f"[INFO] 結果検出中 ({result_streak}/{result_stable_count}): result={result}")
 
-            # ベット額: カウントダウン終了の 4 秒前（タイマーが4秒付近）にスキャン
+            # ベット額: カウントダウン終了の 6 秒前にスキャン（余裕を持ってフロントへ反映するため）
             if state == State.BETTING and "bet_crops" in cap:
-                if (countdown_end_time - now <= 4.0) and not bet_scanned_this_round:
+                if (countdown_end_time - now <= 6.0) and not bet_scanned_this_round:
                     new_bets = detect_all_bets(img, cap["bet_crops"], debug=debug)
                     for k, v in new_bets.items():
                         if v is not None:
                             cached_bets[k] = v
                     bet_scanned_this_round = True
+                    # ベット確定後に予測を再計算（ベット比率を特徴量として使用）
+                    if latest_open_card and (_prediction_model is not None or _side_bet_models is not None):
+                        try:
+                            # ラウンド内でキャッシュ済みの recent_games を再利用（API呼び出し節約）
+                            recent = recent_games_cache if recent_games_cache is not None \
+                                else fetch_recent_games(client, base_url, token, limit=50)
+                            bets_for_pred = {"cowboy": cached_bets.get("cowboy"), "bull": cached_bets.get("bull")}
+                            if _prediction_model is not None:
+                                cached_prediction = ml_predict(
+                                    _prediction_model, latest_open_card, recent,
+                                    cached_jackpot_stock, current_bets=bets_for_pred
+                                )
+                                print(f"[INFO] ベット確定後予測更新: {cached_prediction}")
+                            if _side_bet_models is not None:
+                                cached_side_bet_pred = predict_side_bets(
+                                    _side_bet_models, latest_open_card, recent,
+                                    cached_jackpot_stock, current_bets=bets_for_pred
+                                )
+                        except Exception as e:
+                            print(f"[WARN] ベット確定後予測更新失敗: {e}", file=sys.stderr)
+                    send_preview_now = True  # ベット確定後の更新予測を即時フロントへ送信
 
             # ── 結果未検出中のみ実行（EasyOCR 系・アニメーション競合回避）────
             if state != State.RESULT:
@@ -1554,6 +1743,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                                     # 新しいラウンドのカード検出に備えて、オープンカード状態などをリセット
                                     latest_open_card = None
                                     cached_prediction = None
+                                    cached_side_bet_pred = None
                                     cached_bets = {k: None for k in ALL_BET_KEYS}
                                     bet_scanned_this_round = False
                                     round_number_scanned_this_round = False
@@ -1629,12 +1819,13 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     "winning_hand_scores": winning_hand_scores,
                     "jackpot_stock": cached_jackpot_stock,
                     "prediction":          cached_prediction,
+                    "side_bet_prediction": cached_side_bet_pred,
                     "timer_value":         latest_timer_value,
                     "timer_image":         encode_crop(img, cap["timer_crop"]) if "timer_crop" in cap else None,
                     # 全クロップ領域画像（座標チューニング確認用）
                     "round_image":         encode_crop(img, cap["round_crop"]) if "round_crop" in cap else None,
                     "open_card_image":     encode_jpeg(cached_card_image) if (cached_card_image is not None) else encode_crop(img, cap["open_card_crop"]),
-                    "result_image":        encode_crop(img, cap["result_crop"]) if "result_crop" in cap else None,
+                    "result_image":        encode_crop(cached_result_image if (state == State.RESULT and cached_result_image is not None) else img, cap["result_crop"]) if "result_crop" in cap else None,
                     "jackpot_stock_image": encode_crop(img, cap["jackpot_stock_crop"]) if "jackpot_stock_crop" in cap else None,
                     "bet_images":          {k: encode_crop(img, v) for k, v in cap.get("bet_crops", {}).items()},
                     "win_images":          {k: encode_crop(img, v) for k, v in cap.get("win_regions", {}).items()},
@@ -1702,6 +1893,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     latest_round_number = None
                     latest_open_card = None
                     cached_prediction = None
+                    cached_side_bet_pred = None
                     round_number_scanned_this_round = False
                     ocr_debug_list.clear()
                     log_file_name = None
@@ -1713,6 +1905,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                     result_phase_timer_streak = 0
                     last_result_phase_timer_value = None
                     result_entered_at = 0.0
+                    cached_result_image = None
 
                 time.sleep(poll_fast)
                 if once:
@@ -1812,6 +2005,14 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
                 "pred_bull":     cached_prediction.get("bull")          if cached_prediction else None,
                 "pred_result":   cached_prediction.get("predicted")     if cached_prediction else None,
                 "model_version": cached_prediction.get("model_version") if cached_prediction else None,
+                "pred_any_flash": cached_side_bet_pred.get("any_flash") if cached_side_bet_pred else None,
+                "pred_any_pair":  cached_side_bet_pred.get("any_pair")  if cached_side_bet_pred else None,
+                "pred_any_ace":   cached_side_bet_pred.get("any_ace")   if cached_side_bet_pred else None,
+                "pred_win_high":  cached_side_bet_pred.get("win_high")  if cached_side_bet_pred else None,
+                "pred_win_two":   cached_side_bet_pred.get("win_two")   if cached_side_bet_pred else None,
+                "pred_win_sf":    cached_side_bet_pred.get("win_sf")    if cached_side_bet_pred else None,
+                "pred_win_fh":    cached_side_bet_pred.get("win_fh")    if cached_side_bet_pred else None,
+                "pred_win_four":  cached_side_bet_pred.get("win_four")  if cached_side_bet_pred else None,
             }
             try:
                 resp = post_game(client, base_url, token, payload)
@@ -1865,6 +2066,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
             result_detected_at = None
             cached_card_image = None
             cached_prediction = None
+            cached_side_bet_pred = None
             latest_timer_value = None
             timer_active_last_seen = 0.0
             timer_active_value = 0
@@ -1872,6 +2074,7 @@ def run(cfg: dict, once: bool = False, debug: bool = False) -> None:
             result_phase_timer_streak = 0
             last_result_phase_timer_value = None
             result_entered_at = 0.0
+            cached_result_image = None
             print(f"[INFO] → COOLDOWN ({post_round_cooldown}s)")
 
             if once:

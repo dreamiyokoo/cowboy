@@ -1,31 +1,28 @@
 {
   "model_type": "lgbm",
   "model_version": "lgbm_v1",
-  "trained_at": "2026-06-16T19:44:31.742054",
-  "n_samples": 953,
-  "n_features": 32,
-  "cv_accuracy_mean": 0.4646,
-  "cv_accuracy_std": 0.0427,
-  "cv_log_loss_mean": 0.8217,
-  "train_accuracy": 1.0,
-  "train_log_loss": 0.1735,
-  "train_correct": 953,
-  "train_total": 953,
+  "trained_at": "2026-06-17T05:35:53.580521",
+  "n_samples": 2295,
+  "n_features": 37,
+  "train_accuracy": 0.9983,
+  "train_log_loss": 0.2538,
+  "train_correct": 2291,
+  "train_total": 2295,
   "train_confusion_matrix": [
     [
-      468,
+      1114,
       0,
-      0
+      3
     ],
     [
       0,
-      35,
+      94,
       0
     ],
     [
+      1,
       0,
-      0,
-      450
+      1083
     ]
   ],
   "train_class_names": [

@@ -2,20 +2,40 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
+import AppHeader from "@/app/components/AppHeader";
 import {
   getValidAccessToken,
   clearAccessToken,
 } from "@/app/lib/auth";
 import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  Cell,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ReferenceLine,
+} from "recharts";
+import {
   fetchGames,
   fetchPredictionAccuracy,
+  fetchPredictionRoi,
+  fetchPredictionStreaks,
+  fetchGameIntervals,
+  fetchGamesArchive,
+  fmtAmount,
   type Game,
   type GameResult,
   type PredictionAccuracyResponse,
+  type PredictionRoiResponse,
+  type PredictionStreaksResponse,
+  type GameIntervalsResponse,
+  type GamesArchiveResponse,
 } from "@/app/lib/api";
 
-type TabId = "validation" | "cards" | "spec";
+type TabId = "validation" | "cards" | "intervals" | "spec" | "archive";
 
 export default function PredictionsPage() {
   const router = useRouter();
@@ -24,6 +44,14 @@ export default function PredictionsPage() {
   const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState<TabId>("validation");
   const [predAccuracy, setPredAccuracy] = useState<PredictionAccuracyResponse | null>(null);
+  const [predRoi, setPredRoi] = useState<PredictionRoiResponse | null>(null);
+  const [predStreaks, setPredStreaks] = useState<PredictionStreaksResponse | null>(null);
+  const [gameIntervals, setGameIntervals] = useState<GameIntervalsResponse | null>(null);
+  const [roiConfidence, setRoiConfidence] = useState(0);
+  const [streakFrom, setStreakFrom] = useState("");
+  const [streakTo, setStreakTo] = useState("");
+  const [archiveData, setArchiveData] = useState<GamesArchiveResponse | null>(null);
+  const [archiveBy, setArchiveBy] = useState<"day" | "hour">("day");
 
   // Dynamic stats
   const [stats, setStats] = useState({
@@ -43,6 +71,17 @@ export default function PredictionsPage() {
   function logout() {
     clearAccessToken();
     router.replace("/login");
+  }
+
+  async function loadStreaks() {
+    const token = getValidAccessToken();
+    if (!token) { logout(); return; }
+    try {
+      const streaks = await fetchPredictionStreaks(token, streakFrom || undefined, streakTo || undefined);
+      setPredStreaks(streaks);
+    } catch (e: any) {
+      if (e?.status === 401) logout();
+    }
   }
 
   async function loadData() {
@@ -77,10 +116,20 @@ export default function PredictionsPage() {
       setGames(allGames);
       calculateStats(allGames);
 
-      // 予測精度データ取得
+      // 予測精度・ROI・ストリーク・アーカイブ取得
       try {
-        const acc = await fetchPredictionAccuracy(token);
+        const [acc, roi, streaks, intervals, archive] = await Promise.all([
+          fetchPredictionAccuracy(token),
+          fetchPredictionRoi(token, roiConfidence || undefined),
+          fetchPredictionStreaks(token, streakFrom || undefined, streakTo || undefined),
+          fetchGameIntervals(token),
+          fetchGamesArchive(token, archiveBy),
+        ]);
         setPredAccuracy(acc);
+        setPredRoi(roi);
+        setPredStreaks(streaks);
+        setGameIntervals(intervals);
+        setArchiveData(archive);
       } catch {
         // 予測データなしは無視
       }
@@ -184,6 +233,13 @@ export default function PredictionsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    const token = getValidAccessToken();
+    if (!token) return;
+    fetchGamesArchive(token, archiveBy).then(setArchiveData).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archiveBy]);
+
   const rankOrder = ["A", "K", "Q", "J", "10", "9", "8", "7", "6", "5", "4", "3", "2"];
 
   // --- Validation tab computed values ---
@@ -218,39 +274,7 @@ export default function PredictionsPage() {
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 font-sans">
-      {/* Header */}
-      <header className="sticky top-0 z-10 flex items-center justify-between
-                         bg-gray-900/80 backdrop-blur border-b border-gray-800 px-6 py-3">
-        <h1 className="text-xl font-bold text-yellow-400 flex items-center gap-2">
-          <span>🔮</span> AI・機械学習予測分析
-        </h1>
-        <div className="flex items-center gap-4">
-          <Link
-            href="/dashboard"
-            className="text-sm px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 transition text-gray-300 font-medium"
-          >
-            🏠 ダッシュボード
-          </Link>
-          <Link
-            href="/card-stats"
-            className="text-sm px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 transition text-gray-300 font-medium"
-          >
-            📊 勝率統計
-          </Link>
-          <Link
-            href="/admin"
-            className="text-sm px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 transition text-gray-300 font-medium"
-          >
-            ⚙️ 管理画面
-          </Link>
-          <button
-            onClick={logout}
-            className="text-sm px-3 py-1 rounded bg-red-950/80 hover:bg-red-900 border border-red-900/50 text-red-300 transition"
-          >
-            ログアウト
-          </button>
-        </div>
-      </header>
+      <AppHeader currentPage="predictions" onLogout={logout} />
 
       {/* Main Content */}
       <main className="p-6 max-w-7xl mx-auto space-y-6">
@@ -292,6 +316,17 @@ export default function PredictionsPage() {
                 🃏 オープンカード別勝率
               </button>
               <button
+                id="tab-intervals"
+                onClick={() => setActiveTab("intervals")}
+                className={`px-6 py-3 font-semibold text-sm border-b-2 transition ${
+                  activeTab === "intervals"
+                    ? "border-yellow-500 text-yellow-400"
+                    : "border-transparent text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                🔄 出現間隔統計
+              </button>
+              <button
                 id="tab-spec"
                 onClick={() => setActiveTab("spec")}
                 className={`px-6 py-3 font-semibold text-sm border-b-2 transition ${
@@ -301,6 +336,17 @@ export default function PredictionsPage() {
                 }`}
               >
                 📋 予測モデル仕様設計
+              </button>
+              <button
+                id="tab-archive"
+                onClick={() => setActiveTab("archive")}
+                className={`px-6 py-3 font-semibold text-sm border-b-2 transition ${
+                  activeTab === "archive"
+                    ? "border-yellow-500 text-yellow-400"
+                    : "border-transparent text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                📈 収支アーカイブ
               </button>
             </div>
 
@@ -538,6 +584,179 @@ export default function PredictionsPage() {
                     </div>
                   )}
                 </div>
+
+                {/* ROI Panel */}
+                <div className="bg-gray-900/40 border border-gray-800 rounded-xl p-6 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <h3 className="text-md font-bold text-yellow-500 flex items-center gap-2">
+                      <span>💹</span> 予測ROI・累計損益（予測に従ってベットした場合）
+                    </h3>
+                    <div className="flex items-center gap-2 text-xs">
+                      <label className="text-gray-400">信頼度閾値:</label>
+                      <select
+                        value={roiConfidence}
+                        onChange={e => { setRoiConfidence(Number(e.target.value)); }}
+                        className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200 text-xs"
+                      >
+                        <option value={0}>すべて</option>
+                        <option value={0.55}>55%以上</option>
+                        <option value={0.60}>60%以上</option>
+                        <option value={0.65}>65%以上</option>
+                        <option value={0.70}>70%以上</option>
+                        <option value={0.80}>80%以上</option>
+                      </select>
+                      <button
+                        onClick={loadData}
+                        className="px-2 py-1 bg-gray-800 hover:bg-gray-700 rounded text-gray-300 transition"
+                      >再集計</button>
+                    </div>
+                  </div>
+
+                  {!predRoi || predRoi.total_with_bets === 0 ? (
+                    <div className="bg-gray-950/50 border border-gray-800/50 rounded-lg p-6 text-center text-gray-400 text-sm">
+                      ベット額つき予測データがまだありません。<br />
+                      <span className="text-xs text-gray-500 mt-1 block">pred_result と bet_* の両方が揃ったゲームが蓄積されると表示されます。</span>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {/* Overall ROI */}
+                      <div className="flex items-center gap-4 bg-gray-950/50 p-4 rounded border border-gray-800/50">
+                        <div className="text-center min-w-[100px]">
+                          <p className={`text-3xl font-black ${(predRoi.overall_roi ?? 0) >= 0 ? "text-green-400" : "text-red-400"}`}>
+                            {predRoi.overall_roi != null ? `${(predRoi.overall_roi * 100).toFixed(1)}%` : "—"}
+                          </p>
+                          <p className="text-xs text-gray-500 mt-1">全体ROI</p>
+                        </div>
+                        <div className="flex-1 text-xs text-gray-400">
+                          対象 <span className="text-gray-200 font-semibold">{predRoi.total_with_bets}件</span>（ベット額確定済）
+                          ／ 全予測 {predRoi.total}件<br />
+                          <span className="text-gray-500">ROI = (払戻合計 − ベット合計) ÷ ベット合計。プラスなら予測に従うほど利益。</span>
+                        </div>
+                        <div className="text-right min-w-[80px]">
+                          <p className={`text-lg font-bold ${
+                            (() => {
+                              const cum = predRoi.cumulative_pnl.at(-1)?.cumulative ?? 0;
+                              return cum >= 0 ? "text-green-400" : "text-red-400";
+                            })()
+                          }`}>
+                            {(() => {
+                              const cum = predRoi.cumulative_pnl.at(-1)?.cumulative ?? 0;
+                              return `${cum >= 0 ? "+" : ""}${cum.toLocaleString()}`;
+                            })()}
+                          </p>
+                          <p className="text-xs text-gray-500">累計損益</p>
+                        </div>
+                      </div>
+
+                      {/* Per-class ROI */}
+                      <div className="grid grid-cols-3 gap-3">
+                        {(
+                          [
+                            { key: "cowboy", label: "カウボーイ予測時", color: "text-red-400", border: "border-red-900/30", bg: "bg-red-950/20" },
+                            { key: "bull",   label: "ブル予測時",       color: "text-blue-400",  border: "border-blue-900/30",  bg: "bg-blue-950/20" },
+                            { key: "draw",   label: "抽選予測時",       color: "text-green-400", border: "border-green-900/30", bg: "bg-green-950/20" },
+                          ] as const
+                        ).map(({ key, label, color, border, bg }) => {
+                          const cls = predRoi.by_predicted[key];
+                          const roi = cls.roi;
+                          return (
+                            <div key={key} className={`${bg} ${border} border rounded-xl p-4 text-center space-y-1`}>
+                              <p className={`text-2xl font-black ${roi == null ? "text-gray-500" : roi >= 0 ? "text-green-400" : "text-red-400"}`}>
+                                {roi != null ? `${roi >= 0 ? "+" : ""}${(roi * 100).toFixed(1)}%` : "—"}
+                              </p>
+                              <p className={`text-xs ${color}`}>{label}</p>
+                              <p className="text-xs text-gray-500">{cls.correct}/{cls.total}件正解</p>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Streak Panel */}
+                <div className="bg-gray-900/40 border border-gray-800 rounded-xl p-6 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <h3 className="text-md font-bold text-yellow-500 flex items-center gap-2">
+                      <span>🔴</span> 連続予測ミストリーク
+                    </h3>
+                    <div className="flex items-center gap-2 text-xs">
+                      <input
+                        type="date"
+                        value={streakFrom}
+                        onChange={e => setStreakFrom(e.target.value)}
+                        className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200 text-xs [&::-webkit-calendar-picker-indicator]:invert"
+                      />
+                      <span className="text-gray-500">〜</span>
+                      <input
+                        type="date"
+                        value={streakTo}
+                        onChange={e => setStreakTo(e.target.value)}
+                        className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200 text-xs [&::-webkit-calendar-picker-indicator]:invert"
+                      />
+                      <button
+                        onClick={loadStreaks}
+                        className="px-2 py-1 bg-gray-800 hover:bg-gray-700 rounded text-gray-300 transition"
+                      >絞込</button>
+                    </div>
+                  </div>
+
+                  {!predStreaks || predStreaks.total === 0 ? (
+                    <div className="bg-gray-950/50 border border-gray-800/50 rounded-lg p-6 text-center text-gray-400 text-sm">
+                      まだ予測データがありません。
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {/* Current streak alert */}
+                      {predStreaks.current_miss_streak >= 3 && (
+                        <div className={`rounded-lg p-3 text-sm font-bold text-center ${
+                          predStreaks.current_miss_streak >= 7
+                            ? "bg-red-950/50 border border-red-700/60 text-red-400"
+                            : "bg-orange-950/30 border border-orange-700/40 text-orange-400"
+                        }`}>
+                          ⚠️ 現在 {predStreaks.current_miss_streak}ラウンド連続ミス中
+                        </div>
+                      )}
+
+                      {/* Streak summary */}
+                      <div className="grid grid-cols-2 gap-4">
+                        <div className="bg-gray-950/50 border border-gray-800/50 rounded-xl p-5 text-center space-y-1">
+                          <p className="text-xs text-gray-400">現在の連続ミス</p>
+                          <p className={`text-4xl font-black ${predStreaks.current_miss_streak >= 5 ? "text-red-400" : predStreaks.current_miss_streak >= 3 ? "text-orange-400" : "text-gray-200"}`}>
+                            {predStreaks.current_miss_streak}
+                          </p>
+                          <p className="text-xs text-gray-500">ラウンド連続</p>
+                        </div>
+                        <div className="bg-gray-950/50 border border-gray-800/50 rounded-xl p-5 text-center space-y-1">
+                          <p className="text-xs text-gray-400">最大連続ミス（期間内）</p>
+                          <p className="text-4xl font-black text-red-400">
+                            {predStreaks.max_miss_streak}
+                          </p>
+                          <p className="text-xs text-gray-500">ラウンド連続</p>
+                        </div>
+                      </div>
+
+                      <div className="text-xs text-gray-500 text-right">集計対象: {predStreaks.total}件</div>
+
+                      {/* Streak history */}
+                      {predStreaks.streak_history.length > 0 && (
+                        <div>
+                          <p className="text-xs text-gray-400 font-semibold mb-2">5連続ミス以上の履歴</p>
+                          <div className="space-y-1 max-h-48 overflow-y-auto">
+                            {predStreaks.streak_history.slice().reverse().map((s, i) => (
+                              <div key={i} className="flex items-center justify-between text-xs bg-gray-950/50 border border-gray-800/30 rounded px-3 py-1.5">
+                                <span className="text-red-400 font-bold">{s.streak}ラウンド連続ミス</span>
+                                <span className="text-gray-500 font-mono">
+                                  {new Date(s.from).toLocaleDateString("ja-JP")} 〜 {new Date(s.to).toLocaleDateString("ja-JP")}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 
@@ -651,96 +870,355 @@ export default function PredictionsPage() {
               </div>
             )}
 
-            {/* Tab content 3: ML System Specification */}
+            {/* Tab content 3: Interval Statistics */}
+            {activeTab === "intervals" && (
+              <div className="space-y-4 animate-fadeIn">
+                {!gameIntervals ? (
+                  <div className="text-center text-gray-400 py-16">データを読み込み中...</div>
+                ) : (() => {
+                  const cats = gameIntervals.categories;
+                  const GROUPS = [
+                    {
+                      title: "メイン結果",
+                      keys: ["cowboy", "bull", "draw"],
+                      colors: {
+                        cowboy: { bar: "bg-red-500", text: "text-red-400", border: "border-red-900/40", bg: "bg-red-950/20" },
+                        bull:   { bar: "bg-blue-500", text: "text-blue-400", border: "border-blue-900/40", bg: "bg-blue-950/20" },
+                        draw:   { bar: "bg-green-500", text: "text-green-400", border: "border-green-900/40", bg: "bg-green-950/20" },
+                      } as Record<string, { bar: string; text: string; border: string; bg: string }>,
+                    },
+                    {
+                      title: "サイドベット WIN",
+                      keys: ["any_flash", "any_pair", "win_high", "win_two", "win_sf", "win_fh", "any_ace", "win_four"],
+                      colors: {} as Record<string, { bar: string; text: string; border: string; bg: string }>,
+                    },
+                  ];
+
+                  return (
+                    <div className="space-y-6">
+                      <p className="text-xs text-gray-500">
+                        総ゲーム数: <span className="text-gray-300 font-bold">{gameIntervals.total_games.toLocaleString()}</span> 件 ／ インターバル = 連続して出現しなかったゲーム数（1 = 毎回）
+                      </p>
+                      {GROUPS.map(group => (
+                        <div key={group.title}>
+                          <h3 className="text-sm font-bold text-yellow-500 mb-3">{group.title}</h3>
+                          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                            {group.keys.map(key => {
+                              const cat = cats[key];
+                              if (!cat) return null;
+                              const col = group.colors[key] ?? {
+                                bar: "bg-yellow-500", text: "text-yellow-400",
+                                border: "border-yellow-900/40", bg: "bg-yellow-950/10",
+                              };
+                              const maxCount = Math.max(...cat.histogram.map(b => b.count), 1);
+                              const isRare = (cat.mean_interval ?? 0) > 30;
+                              const gapWarn = cat.current_gap > (cat.p75_interval ?? cat.max_interval ?? 99);
+                              return (
+                                <div key={key} className={`${col.bg} ${col.border} border rounded-xl p-4 space-y-3`}>
+                                  {/* Header */}
+                                  <div className="flex items-start justify-between">
+                                    <div>
+                                      <p className={`font-bold text-sm ${col.text}`}>{cat.label}</p>
+                                      <p className="text-xs text-gray-500">オッズ {cat.odds}倍 ／ {cat.count}回出現</p>
+                                    </div>
+                                    <div className={`text-right ${gapWarn ? "text-orange-400" : "text-gray-300"}`}>
+                                      <p className="text-xl font-black">{cat.current_gap}G</p>
+                                      <p className="text-[10px] text-gray-500">前回から</p>
+                                    </div>
+                                  </div>
+
+                                  {/* Summary stats */}
+                                  <div className="grid grid-cols-3 gap-1 text-center text-xs">
+                                    <div className="bg-gray-900/60 rounded p-1.5">
+                                      <p className="text-gray-400">平均</p>
+                                      <p className="font-bold text-gray-200">{cat.mean_interval ?? "—"}G</p>
+                                    </div>
+                                    <div className="bg-gray-900/60 rounded p-1.5">
+                                      <p className="text-gray-400">中央値</p>
+                                      <p className="font-bold text-gray-200">{cat.median_interval ?? "—"}G</p>
+                                    </div>
+                                    <div className="bg-gray-900/60 rounded p-1.5">
+                                      <p className="text-gray-400">最大空白</p>
+                                      <p className="font-bold text-red-400">{cat.max_interval ?? "—"}G</p>
+                                    </div>
+                                  </div>
+
+                                  {/* Histogram */}
+                                  <div>
+                                    <p className="text-[10px] text-gray-600 mb-1">インターバル分布</p>
+                                    <div className="space-y-0.5">
+                                      {cat.histogram.filter(b => b.count > 0 || !isRare).map((b, i) => (
+                                        <div key={i} className="flex items-center gap-1.5">
+                                          <span className="text-[10px] text-gray-500 font-mono w-12 text-right shrink-0">{b.label}G</span>
+                                          <div className="flex-1 bg-gray-900/60 rounded-full h-3 overflow-hidden">
+                                            <div
+                                              className={`${col.bar} h-full rounded-full transition-all`}
+                                              style={{ width: `${(b.count / maxCount) * 100}%` }}
+                                            />
+                                          </div>
+                                          <span className="text-[10px] text-gray-400 w-8 text-right shrink-0">{b.count}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+
+                                  {/* Warning: current gap exceeds p75 */}
+                                  {gapWarn && (
+                                    <p className="text-[10px] text-orange-400 bg-orange-950/20 border border-orange-900/30 rounded px-2 py-1">
+                                      ⚠ 現在の空白({cat.current_gap}G)が75%ile({cat.p75_interval}G)を超えています
+                                    </p>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+
+            {/* Tab content 4: ML System Specification */}
             {activeTab === "spec" && (
               <div className="space-y-6 animate-fadeIn text-sm leading-relaxed">
-                <div className="bg-gray-900/40 border border-gray-800 rounded-xl p-6 space-y-6">
+
+                {/* 現在稼働中の予測ルール（実装済み） */}
+                <div className="bg-gray-900/40 border border-yellow-900/40 rounded-xl p-6 space-y-5">
+                  <div className="flex items-center gap-3">
+                    <span className="px-3 py-1 bg-yellow-500/15 text-yellow-400 font-black text-xs rounded-full border border-yellow-700/50 tracking-widest">LIVE</span>
+                    <h2 className="text-lg font-bold text-yellow-400">現在稼働中の予測ロジック</h2>
+                  </div>
+
+                  {/* アルゴリズム */}
+                  <div className="flex items-start gap-4 bg-yellow-950/10 border border-yellow-900/30 rounded-lg p-4">
+                    <div className="text-3xl">🌳</div>
+                    <div>
+                      <p className="text-yellow-300 font-bold text-base">LightGBM（勾配ブースティング木）</p>
+                      <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+                        多数の決定木を直列に積み重ね、前の木の誤りを次の木が補正し続けるアンサンブル学習。<br />
+                        「このカードが来たとき、直近の流れはこうで、時間帯はこうなら → ブル有利」という<strong className="text-gray-200">複数条件の組み合わせルール</strong>を自動で学習する。
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* 出力 */}
                   <div>
-                    <h2 className="text-lg font-bold text-yellow-400 border-b border-gray-800 pb-2 flex items-center gap-2">
-                      <span>🔮</span> カウボーイ AI機械学習予測システム設計書
-                    </h2>
-                    <p className="text-xs text-gray-400 mt-2">過去にキャプチャしたデータをもとに、機械学習で勝敗を予測するシステムの構造設計です。</p>
+                    <p className="text-xs text-gray-400 font-semibold uppercase tracking-wider mb-2">出力（オープンカード確認後に計算）</p>
+                    <div className="grid grid-cols-3 gap-3 text-xs font-mono">
+                      <div className="bg-red-950/20 border border-red-900/30 rounded-lg p-3 text-center">
+                        <p className="text-red-400 font-bold text-base">P(カウボーイ)</p>
+                        <p className="text-gray-500 mt-1">例: 54%</p>
+                      </div>
+                      <div className="bg-green-950/20 border border-green-900/30 rounded-lg p-3 text-center">
+                        <p className="text-green-400 font-bold text-base">P(抽選)</p>
+                        <p className="text-gray-500 mt-1">例: 6%</p>
+                      </div>
+                      <div className="bg-blue-950/20 border border-blue-900/30 rounded-lg p-3 text-center">
+                        <p className="text-blue-400 font-bold text-base">P(ブル)</p>
+                        <p className="text-gray-500 mt-1">例: 40%</p>
+                      </div>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-2">最も確率が高いクラスを予測結果として表示。ダッシュボードのゲージが 50%超で強調表示。</p>
                   </div>
 
-                  {/* Section 1 */}
-                  <div className="space-y-3">
-                    <h3 className="text-sm font-bold text-gray-200 border-l-4 border-yellow-500 pl-2">1. 予測のターゲット変数（目的変数）</h3>
-                    <p className="text-gray-300">
-                      モデルの目的は、各ゲームの最終結果（`result`）がどのポジションになるかを予測する<strong>多クラス分類 (Multi-class Classification)</strong> タスクです。
+                  {/* 入力特徴量 */}
+                  <div>
+                    <p className="text-xs text-gray-400 font-semibold uppercase tracking-wider mb-3">入力特徴量（計 37 変数）</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
+
+                      <div className="bg-gray-950/60 border border-gray-800 rounded-lg p-4 space-y-2">
+                        <p className="text-yellow-400 font-bold flex items-center gap-1">🃏 カード <span className="text-gray-500 font-normal">19変数</span></p>
+                        <ul className="space-y-1 text-gray-300">
+                          <li className="flex justify-between"><span>ランク数値</span><span className="text-gray-500 font-mono">rank_num</span></li>
+                          <li className="flex justify-between"><span>ランク one-hot</span><span className="text-gray-500 font-mono">×13</span></li>
+                          <li className="flex justify-between"><span>スート one-hot</span><span className="text-gray-500 font-mono">×4</span></li>
+                          <li className="flex justify-between"><span>赤カードフラグ</span><span className="text-gray-500 font-mono">is_red</span></li>
+                        </ul>
+                      </div>
+
+                      <div className="bg-gray-950/60 border border-gray-800 rounded-lg p-4 space-y-2">
+                        <p className="text-yellow-400 font-bold flex items-center gap-1">📈 流れ <span className="text-gray-500 font-normal">10変数</span></p>
+                        <ul className="space-y-1 text-gray-300">
+                          <li className="flex justify-between"><span>直前3Gの結果</span><span className="text-gray-500 font-mono">×3</span></li>
+                          <li className="flex justify-between"><span>直前2Gのカード</span><span className="text-gray-500 font-mono">×2</span></li>
+                          <li className="flex justify-between"><span>カウボーイ/ブル連勝</span><span className="text-gray-500 font-mono">×2</span></li>
+                          <li className="flex justify-between"><span>直近10G勝率</span><span className="text-gray-500 font-mono">×2</span></li>
+                          <li className="flex justify-between"><span>直近50G勝率/抽選率</span><span className="text-gray-500 font-mono">×2</span></li>
+                        </ul>
+                      </div>
+
+                      <div className="bg-yellow-950/20 border border-yellow-800/50 rounded-lg p-4 space-y-2">
+                        <p className="text-yellow-300 font-bold flex items-center gap-1">💰 ベット額 <span className="text-yellow-600 font-normal">5変数 NEW</span></p>
+                        <ul className="space-y-1 text-gray-300">
+                          <li className="flex justify-between"><span>直前3Gのカウボーイ率</span><span className="text-gray-500 font-mono">×3</span></li>
+                          <li className="flex justify-between"><span>現Gカウボーイ率</span><span className="text-gray-500 font-mono">cur_ratio</span></li>
+                          <li className="flex justify-between"><span>ベット確定フラグ</span><span className="text-gray-500 font-mono">has_bets</span></li>
+                        </ul>
+                        <p className="text-yellow-700 text-[10px] leading-relaxed pt-1">カード検出時は比率 0.5（中立）で初回予測 → ベット確定後（〜4秒前）に再計算して更新</p>
+                      </div>
+
+                      <div className="bg-gray-950/60 border border-gray-800 rounded-lg p-4 space-y-2">
+                        <p className="text-yellow-400 font-bold flex items-center gap-1">🕐 時刻 <span className="text-gray-500 font-normal">2変数</span></p>
+                        <ul className="space-y-1 text-gray-300">
+                          <li className="flex justify-between"><span>時刻（0〜23時）</span><span className="text-gray-500 font-mono">hour</span></li>
+                          <li className="flex justify-between"><span>曜日（月〜日）</span><span className="text-gray-500 font-mono">dow</span></li>
+                        </ul>
+                        <p className="text-gray-600 text-[10px] leading-relaxed pt-1 mt-2 border-t border-gray-800">❌ 未使用: ジャックポット額</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 期待値の考え方 */}
+                  <div className="bg-gray-950/60 border border-gray-800 rounded-lg p-4 text-xs space-y-2">
+                    <p className="text-gray-200 font-bold">期待値の考え方</p>
+                    <p className="text-gray-400 leading-relaxed">
+                      正解率（Accuracy）だけでは不十分。カウボーイ/ブルのオッズは <strong className="text-gray-200">2.02倍</strong>なので、
+                      50%超えれば期待値プラス。抽選は <strong className="text-gray-200">22倍</strong>なので 5%超えれば期待値プラス。
                     </p>
-                    <div className="bg-gray-950/50 border border-gray-850 rounded p-4 text-xs font-mono grid grid-cols-3 gap-2">
-                      <div className="text-red-400">P(cowboy): カウボーイ勝確率</div>
-                      <div className="text-blue-400">P(bull): ブル勝確率</div>
-                      <div className="text-green-400">P(draw): 抽選（タイ）確率</div>
-                    </div>
-                  </div>
-
-                  {/* Section 2 */}
-                  <div className="space-y-3">
-                    <h3 className="text-sm font-bold text-gray-200 border-l-4 border-yellow-500 pl-2">2. 特徴量設計 (Feature Engineering)</h3>
-                    <p className="text-gray-300">予測モデルにインプットする特徴量の設計リストです。</p>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                      <div className="bg-gray-950/50 border border-gray-850 rounded p-4 space-y-2">
-                        <h4 className="font-bold text-yellow-400">① カード特徴量 (物理因子)</h4>
-                        <ul className="list-disc list-inside space-y-1 text-gray-400">
-                          <li>オープンカードの数字 (2〜A)</li>
-                          <li>オープンカードのスート (S,H,D,C)</li>
-                          <li>カードの強さ順の数値化</li>
-                        </ul>
-                      </div>
-                      <div className="bg-gray-950/50 border border-gray-850 rounded p-4 space-y-2">
-                        <h4 className="font-bold text-yellow-400">② ベット特徴量 (集団心理/情報)</h4>
-                        <ul className="list-disc list-inside space-y-1 text-gray-400">
-                          <li>カウボーイ vs ブルの金額比率</li>
-                          <li>大口ベット（クジラ）の検知フラグ</li>
-                          <li>サイドベットの賭け金分布</li>
-                        </ul>
-                      </div>
-                      <div className="bg-gray-950/50 border border-gray-850 rounded p-4 space-y-2">
-                        <h4 className="font-bold text-yellow-400">③ 時系列特徴量 (シャッフル癖)</h4>
-                        <ul className="list-disc list-inside space-y-1 text-gray-400">
-                          <li>直近 1〜3 ゲームの勝敗結果</li>
-                          <li>直近のオープンカード数字の塊</li>
-                          <li>カウボーイ/ブルの現在の連勝数</li>
-                        </ul>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Section 3 */}
-                  <div className="space-y-3">
-                    <h3 className="text-sm font-bold text-gray-200 border-l-4 border-yellow-500 pl-2">3. 採用モデル & アルゴリズム候補</h3>
-                    <div className="space-y-3 text-xs text-gray-300">
-                      <div className="flex gap-4 items-start bg-gray-950/40 p-3 rounded border border-gray-850">
-                        <span className="px-2 py-1 bg-yellow-500/10 text-yellow-400 font-bold rounded">LightGBM</span>
-                        <div>
-                          <strong className="block mb-1">勾配ブースティング木（推奨）</strong>
-                          ベット比率やカードランクなどの非線形な関係を捉える上で最も精度が高く、リアルタイム予測に対応可能。
-                        </div>
-                      </div>
-                      <div className="flex gap-4 items-start bg-gray-950/40 p-3 rounded border border-gray-850">
-                        <span className="px-2 py-1 bg-yellow-500/10 text-yellow-400 font-bold rounded">Logistic Regression</span>
-                        <div>
-                          <strong className="block mb-1">ロジスティック回帰</strong>
-                          どの変数が勝敗に最も寄与しているか（Aカードの出現、偏ったベットなど）を数式として明確に説明できるベースラインモデル。
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Section 4 */}
-                  <div className="space-y-3">
-                    <h3 className="text-sm font-bold text-gray-200 border-l-4 border-yellow-500 pl-2">4. 期待値(ROI)インジケーターによるバックテスト方法</h3>
-                    <p className="text-gray-300">
-                      モデルの良し悪しは予測の正解率(Accuracy)ではなく、<strong>期待値が1.0を超えるゲームにのみ賭けた場合のシミュレーション収支</strong>で判定します。
-                    </p>
-                    <div className="bg-yellow-950/5 border border-yellow-900/20 rounded-lg p-4 text-xs text-yellow-400/90 leading-relaxed font-mono">
-                      【期待期待値の計算式】<br />
-                      期待利益 = (予測した勝率 × 配当オッズ) - 1.0 <br />
-                      ※ 例: カウボーイの予測確率が 55% でオッズが 2.02 倍の場合、期待値は (0.55 × 2.02) = 1.111 (期待ROI +11.1%) となり、ベットゴーと判定。
+                    <div className="font-mono text-gray-500 bg-gray-900/50 rounded p-2 leading-relaxed">
+                      期待ROI = (予測確率 × オッズ) − 1.0<br />
+                      例: カウボーイ 54% × 2.02 = 1.091 → 期待ROI <span className="text-green-400">+9.1%</span>
                     </div>
                   </div>
                 </div>
+
+              </div>
+            )}
+
+            {/* Tab: Archive */}
+            {activeTab === "archive" && (
+              <div className="space-y-6 animate-fadeIn">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold text-gray-400">収支アーカイブ</h2>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-500">単位:</span>
+                    <select
+                      value={archiveBy}
+                      onChange={(e) => setArchiveBy(e.target.value as "day" | "hour")}
+                      className="bg-gray-900 border border-gray-800 text-gray-300 text-xs rounded px-2.5 py-1 focus:outline-none focus:border-yellow-400 cursor-pointer"
+                    >
+                      <option value="day">日別</option>
+                      <option value="hour">時間別</option>
+                    </select>
+                  </div>
+                </div>
+
+                {!archiveData ? (
+                  <div className="text-center text-gray-500 py-12 text-sm">読み込み中…</div>
+                ) : archiveData.records.length === 0 ? (
+                  <div className="text-center text-gray-500 py-12 text-sm">データがありません</div>
+                ) : (
+                  <>
+                    {/* PnL Bar Chart */}
+                    <div className="bg-gray-900/40 border border-gray-800 rounded-xl p-5">
+                      <p className="text-xs text-gray-400 font-semibold mb-4">収支合算（ベット − 払い出し）</p>
+                      <ResponsiveContainer width="100%" height={260}>
+                        <BarChart
+                          data={archiveData.records}
+                          margin={{ top: 4, right: 8, left: 8, bottom: 40 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                          <XAxis
+                            dataKey="period"
+                            tick={{ fill: "#9ca3af", fontSize: 10 }}
+                            angle={-35}
+                            textAnchor="end"
+                            interval={0}
+                          />
+                          <YAxis
+                            tick={{ fill: "#9ca3af", fontSize: 10 }}
+                            tickFormatter={(v: number) => fmtAmount(v)}
+                          />
+                          <Tooltip
+                            contentStyle={{ background: "#111827", border: "1px solid #374151", borderRadius: 8 }}
+                            labelStyle={{ color: "#e5e7eb", fontSize: 11 }}
+                            formatter={(value: number, name: string) => [fmtAmount(value), name]}
+                          />
+                          <ReferenceLine y={0} stroke="#6b7280" strokeDasharray="4 2" />
+                          <Bar
+                            dataKey="pnl"
+                            name="収支"
+                            radius={[3, 3, 0, 0]}
+                            isAnimationActive={false}
+                          >
+                            {archiveData.records.map((r, idx) => (
+                              <Cell key={idx} fill={r.pnl >= 0 ? "#22c55e" : "#ef4444"} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+
+                    {/* Bet / Payout stacked area */}
+                    <div className="bg-gray-900/40 border border-gray-800 rounded-xl p-5">
+                      <p className="text-xs text-gray-400 font-semibold mb-4">総ベット vs 払い出し</p>
+                      <ResponsiveContainer width="100%" height={220}>
+                        <BarChart
+                          data={archiveData.records}
+                          margin={{ top: 4, right: 8, left: 8, bottom: 40 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                          <XAxis
+                            dataKey="period"
+                            tick={{ fill: "#9ca3af", fontSize: 10 }}
+                            angle={-35}
+                            textAnchor="end"
+                            interval={0}
+                          />
+                          <YAxis
+                            tick={{ fill: "#9ca3af", fontSize: 10 }}
+                            tickFormatter={(v: number) => fmtAmount(v)}
+                          />
+                          <Tooltip
+                            contentStyle={{ background: "#111827", border: "1px solid #374151", borderRadius: 8 }}
+                            labelStyle={{ color: "#e5e7eb", fontSize: 11 }}
+                            formatter={(value: number, name: string) => [fmtAmount(value), name]}
+                          />
+                          <Bar dataKey="total_bet"    name="ベット"    fill="#6b7280" radius={[2,2,0,0]} />
+                          <Bar dataKey="total_payout" name="払い出し"  fill="#3b82f6" radius={[2,2,0,0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+
+                    {/* Summary table */}
+                    <div className="overflow-x-auto rounded-xl border border-gray-800">
+                      <table className="min-w-full text-xs">
+                        <thead className="bg-gray-900 text-gray-400">
+                          <tr>
+                            <th className="px-3 py-2 text-left font-semibold">{archiveBy === "day" ? "日付" : "時間帯"}</th>
+                            <th className="px-3 py-2 text-right font-semibold">ゲーム数</th>
+                            <th className="px-3 py-2 text-right font-semibold">CB%</th>
+                            <th className="px-3 py-2 text-right font-semibold">ブル%</th>
+                            <th className="px-3 py-2 text-right font-semibold">総ベット</th>
+                            <th className="px-3 py-2 text-right font-semibold">払い出し</th>
+                            <th className="px-3 py-2 text-right font-semibold">収支</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-800">
+                          {[...archiveData.records].reverse().map((r) => (
+                            <tr key={r.period} className="hover:bg-gray-800/30">
+                              <td className="px-3 py-1.5 text-gray-300 whitespace-nowrap font-mono">{r.period}</td>
+                              <td className="px-3 py-1.5 text-right text-gray-400">{r.game_count}</td>
+                              <td className={`px-3 py-1.5 text-right font-semibold ${(r.cowboy_rate ?? 0) > 0.55 ? "text-red-300" : (r.cowboy_rate ?? 0) < 0.35 ? "text-blue-300" : "text-gray-300"}`}>
+                                {r.cowboy_rate != null ? `${(r.cowboy_rate * 100).toFixed(1)}%` : "—"}
+                              </td>
+                              <td className={`px-3 py-1.5 text-right font-semibold ${(r.bull_rate ?? 0) > 0.55 ? "text-blue-300" : (r.bull_rate ?? 0) < 0.35 ? "text-red-300" : "text-gray-300"}`}>
+                                {r.bull_rate != null ? `${(r.bull_rate * 100).toFixed(1)}%` : "—"}
+                              </td>
+                              <td className="px-3 py-1.5 text-right text-gray-400">{fmtAmount(r.total_bet)}</td>
+                              <td className="px-3 py-1.5 text-right text-blue-400">{fmtAmount(r.total_payout)}</td>
+                              <td className={`px-3 py-1.5 text-right font-bold ${r.pnl > 0 ? "text-green-400" : r.pnl < 0 ? "text-red-400" : "text-gray-400"}`}>
+                                {r.pnl > 0 ? "+" : ""}{fmtAmount(r.pnl)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
               </div>
             )}
           </>

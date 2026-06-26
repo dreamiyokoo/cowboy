@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
+import AppHeader from "@/app/components/AppHeader";
 import {
   getValidAccessToken,
   clearAccessToken,
@@ -202,37 +202,7 @@ export default function CardStatsPage() {
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
-      {/* ヘッダー */}
-      <header className="sticky top-0 z-10 flex items-center justify-between
-                         bg-gray-900/80 backdrop-blur border-b border-gray-800 px-6 py-3">
-        <h1 className="text-xl font-bold text-yellow-400">📊 カード別 WIN確率</h1>
-        <div className="flex items-center gap-4">
-          <Link
-            href="/dashboard"
-            className="text-sm px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 transition text-gray-300 font-medium"
-          >
-            🏠 ダッシュボード
-          </Link>
-          <Link
-            href="/predictions"
-            className="text-sm px-3 py-1 rounded bg-yellow-950/40 hover:bg-yellow-900/60 border border-yellow-900/30 transition text-yellow-300 font-medium"
-          >
-            🔮 AI予測
-          </Link>
-          <Link
-            href="/admin"
-            className="text-sm px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 transition text-gray-300 font-medium"
-          >
-            ⚙️ 管理画面
-          </Link>
-          <button
-            onClick={logout}
-            className="text-sm px-3 py-1 rounded bg-red-950/80 hover:bg-red-900 border border-red-900/50 text-red-300 transition"
-          >
-            ログアウト
-          </button>
-        </div>
-      </header>
+      <AppHeader currentPage="card-stats" onLogout={logout} />
 
       {/* メインコンテンツ */}
       <main className="p-6 max-w-7xl mx-auto space-y-6">

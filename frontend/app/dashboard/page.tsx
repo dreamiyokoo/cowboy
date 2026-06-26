@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
+import AppHeader from "@/app/components/AppHeader";
+import GameProgressBar from "@/app/components/GameProgressBar";
 import {
   buildChartData,
   CowboyBullDiffChart,
@@ -19,6 +20,7 @@ import {
   fetchGames,
   fetchCapturePreview,
   fetchCardStatSingle,
+  fetchGameIntervals,
   fmtAmount,
   RESULT_LABEL,
   RESULT_COLOR,
@@ -36,10 +38,12 @@ import {
   type GameResult,
   type CapturePreview,
   type CardStatsItem,
+  type GameIntervalsResponse,
 } from "@/app/lib/api";
 
 const REFRESH_INTERVAL = 30_000;
 const PREVIEW_INTERVAL = 3_000;
+const PREVIEW_INTERVAL_BETTING = 1_000;
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -52,8 +56,10 @@ export default function DashboardPage() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const previewTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastFetchedCardRef = useRef<string | null>(null);
+  const lastSoundResultRef = useRef<string | null>(null);
 
-  const [limit, setLimit] = useState(100);
+  const [limit, setLimit] = useState(500);
+  const [historyLimit, setHistoryLimit] = useState(10);
   const [selectedLogText, setSelectedLogText] = useState<string | null>(null);
   const [selectedLogTitle, setSelectedLogTitle] = useState("");
   const [isLogModalOpen, setIsLogModalOpen] = useState(false);
@@ -63,6 +69,7 @@ export default function DashboardPage() {
   const [isCaptureModalOpen, setIsCaptureModalOpen] = useState(false);
   const [isLoadingCapture, setIsLoadingCapture] = useState(false);
   const [cardStat, setCardStat] = useState<CardStatsItem | null>(null);
+  const [gameIntervals, setGameIntervals] = useState<GameIntervalsResponse | null>(null);
 
   function logout() {
     clearAccessToken();
@@ -73,12 +80,14 @@ export default function DashboardPage() {
     const token = getValidAccessToken();
     if (!token) { router.replace("/login"); return; }
     try {
-      const [s, g] = await Promise.all([
+      const [s, g, iv] = await Promise.all([
         fetchStats(token),
         fetchGames(token, limit, 0),
+        fetchGameIntervals(token),
       ]);
       setStats(s);
       setGamesData(g);
+      setGameIntervals(iv);
       setLastUpdated(new Date());
       setError("");
     } catch (e: unknown) {
@@ -190,58 +199,56 @@ export default function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [limit]);
 
+  // 結果確定時にサウンドを再生（result_detected_at をキーにして1回だけ）
+  useEffect(() => {
+    const result = preview?.result;
+    const detectedAt = preview?.result_detected_at;
+    if (!result || !detectedAt || result === "error") return;
+    if (detectedAt === lastSoundResultRef.current) return;
+    lastSoundResultRef.current = detectedAt;
+    const audio = new Audio(`/sound/${result}.wav`);
+    audio.play().catch(() => {});
+  }, [preview?.result, preview?.result_detected_at]);
+
+  // BETTING中はポーリングを1秒に短縮してベットスキャン後の更新予測を即時反映
+  useEffect(() => {
+    if (previewTimerRef.current) clearInterval(previewTimerRef.current);
+    const interval = preview?.game_state === "betting" ? PREVIEW_INTERVAL_BETTING : PREVIEW_INTERVAL;
+    previewTimerRef.current = setInterval(loadPreview, interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preview?.game_state]);
+
   const games = gamesData?.games ?? [];
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
-      {/* ヘッダー */}
-      <header className="sticky top-0 z-10 flex items-center justify-between
-                         bg-gray-900/80 backdrop-blur border-b border-gray-800 px-6 py-3">
-        <h1 className="text-xl font-bold text-yellow-400">🤠 Cowboy Dashboard</h1>
-        <div className="flex items-center gap-4">
-          {lastUpdated && (
-            <span className="text-xs text-gray-500">
-              更新: {lastUpdated.toLocaleTimeString("ja-JP")}
-            </span>
-          )}
-          <Link
-            href="/predictions"
-            className="text-sm px-3 py-1 rounded bg-yellow-950/40 hover:bg-yellow-900/60 border border-yellow-900/30 transition text-yellow-300 font-medium"
-          >
-            🔮 AI予測
-          </Link>
-          <Link
-            href="/card-stats"
-            className="text-sm px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 transition text-gray-300 font-medium"
-          >
-            📊 勝率統計
-          </Link>
-          <Link
-            href="/admin"
-            className="text-sm px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 transition text-gray-300 font-medium"
-          >
-            ⚙️ 管理画面
-          </Link>
-          <button
-            onClick={load}
-            className="text-sm px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 transition"
-          >
-            更新
-          </button>
-          <button
-            onClick={logout}
-            className="text-sm px-3 py-1 rounded bg-red-900 hover:bg-red-800 transition"
-          >
-            ログアウト
-          </button>
-        </div>
-      </header>
+      <AppHeader
+        currentPage="dashboard"
+        onLogout={logout}
+        onRefresh={load}
+        lastUpdated={lastUpdated}
+      />
+      <GameProgressBar preview={preview} />
 
       <main className="p-4 md:p-6 space-y-6">
         {error && (
           <div className="rounded-lg bg-red-900/60 border border-red-700 px-4 py-3 text-red-300">
             {error}
           </div>
+        )}
+
+        {/* AI予測カード（常時表示） */}
+        {preview?.prediction && (
+          <AIPredictionCard
+            prediction={preview.prediction}
+            sideBet={preview.side_bet_prediction}
+            roundNumber={preview.round_number}
+            gameState={preview.game_state}
+            openCard={preview.open_card}
+            gaps={gameIntervals ? Object.fromEntries(
+              Object.entries(gameIntervals.categories).map(([k, v]) => [k, (v as { current_gap: number }).current_gap] as [string, number])
+            ) : undefined}
+          />
         )}
 
         {/* ライブキャプチャプレビュー */}
@@ -369,7 +376,13 @@ export default function DashboardPage() {
                   <p className="text-gray-600 text-xs">プレビューデータがありません</p>
                 )}
                 {preview?.prediction && (
-                  <PredictionGauge prediction={preview.prediction} />
+                  <PredictionGauge
+                    prediction={preview.prediction}
+                    sideBet={preview.side_bet_prediction}
+                    gaps={gameIntervals ? Object.fromEntries(
+                      Object.entries(gameIntervals.categories).map(([k, v]) => [k, v.current_gap] as [string, number])
+                    ) : undefined}
+                  />
                 )}
               </div>
 
@@ -647,7 +660,7 @@ export default function DashboardPage() {
                   <option value={50}>直近 50 件</option>
                   <option value={100}>直近 100 件</option>
                   <option value={200}>直近 200 件</option>
-                  <option value={1000}>全件を表示</option>
+                  <option value={500}>直近 500 件</option>
                 </select>
               </div>
             </div>
@@ -670,8 +683,21 @@ export default function DashboardPage() {
           <section>
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-semibold text-gray-400">
-                ゲーム履歴 (最新 {games.length} 件 / 全 {gamesData?.total} 件)
+                ゲーム履歴 (全 {gamesData?.total} 件)
               </h2>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500 font-medium">表示件数:</span>
+                <select
+                  value={historyLimit}
+                  onChange={(e) => setHistoryLimit(Number(e.target.value))}
+                  className="bg-gray-900 border border-gray-800 text-gray-300 text-xs rounded px-2.5 py-1 focus:outline-none focus:border-yellow-400 cursor-pointer font-medium"
+                >
+                  <option value={10}>10 件</option>
+                  <option value={25}>25 件</option>
+                  <option value={50}>50 件</option>
+                  <option value={100}>100 件</option>
+                </select>
+              </div>
             </div>
             <div className="overflow-x-auto rounded-xl border border-gray-800">
               <table className="min-w-full text-xs">
@@ -692,7 +718,7 @@ export default function DashboardPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800">
-                  {games.map((g, i) => (
+                  {games.slice(0, historyLimit).map((g, i) => (
                     <GameRow key={g.id} game={g} prevGame={games[i + 1]} onViewLog={handleViewLog} onViewCapture={handleViewCapture} />
                   ))}
                 </tbody>
@@ -1050,7 +1076,145 @@ function GameRow({
   );
 }
 
-function PredictionGauge({ prediction }: {
+type SideBetPred = Record<string, number | null> | null | undefined;
+
+// ── 常時表示 AI予測カード ─────────────────────────────────────────────────────
+type SideBetPredType = {
+  any_flash?: number | null; any_pair?: number | null; any_ace?: number | null;
+  win_high?: number | null; win_two?: number | null; win_sf?: number | null;
+  win_fh?: number | null; win_four?: number | null;
+};
+
+function AIPredictionCard({ prediction, sideBet, roundNumber, gameState, openCard, gaps }: {
+  prediction: { cowboy: number; draw: number; bull: number; predicted: "cowboy" | "draw" | "bull"; model_version: string };
+  sideBet?: SideBetPredType | null;
+  roundNumber?: number | null;
+  gameState?: string | null;
+  openCard?: string | null;
+  gaps?: Record<string, number>;
+}) {
+  const MAIN: { key: "cowboy" | "draw" | "bull"; emoji: string; label: string; bar: string; ring: string }[] = [
+    { key: "cowboy", emoji: "🤠", label: "カウボーイ", bar: "bg-red-500",   ring: "ring-red-500"   },
+    { key: "draw",   emoji: "🎲", label: "抽選",       bar: "bg-green-500", ring: "ring-green-500" },
+    { key: "bull",   emoji: "🐂", label: "ブル",       bar: "bg-blue-500",  ring: "ring-blue-500"  },
+  ];
+  const SIDE: { key: string; label: string }[] = [
+    { key: "any_flash", label: "FL/CN" }, { key: "any_pair", label: "1ペア" },
+    { key: "any_ace",   label: "Aペア" }, { key: "win_high",  label: "ハイ/1P" },
+    { key: "win_two",   label: "2ペア" }, { key: "win_sf",    label: "3K+" },
+    { key: "win_fh",    label: "FH" },    { key: "win_four",  label: "4K+" },
+  ];
+
+  const maxPct = Math.max(
+    Math.round(prediction.cowboy * 100),
+    Math.round(prediction.draw   * 100),
+    Math.round(prediction.bull   * 100),
+  );
+  const isLowConf = maxPct < 40;
+
+  const stateLabel: Record<string, string> = {
+    betting: "🗳️ 投票中",
+    preparing: "🔄 準備中",
+    result: "✅ 結果表示",
+    cooldown: "💤 待機中",
+  };
+
+  return (
+    <section className={`rounded-xl border-2 p-4 ${isLowConf ? "border-yellow-800/50 bg-yellow-950/20" : "border-yellow-600/60 bg-yellow-950/30"}`}>
+      {/* ヘッダー */}
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-bold text-yellow-400">🤖 AI予測</h2>
+          {roundNumber != null && (
+            <span className="text-xs px-2 py-0.5 bg-gray-800 text-gray-300 rounded font-mono">R{roundNumber}</span>
+          )}
+          {openCard && (
+            <span className="text-xs px-2 py-0.5 bg-gray-800 text-gray-300 rounded font-mono">{openCard}</span>
+          )}
+          {gameState && stateLabel[gameState] && (
+            <span className={`text-xs px-2 py-0.5 rounded font-semibold ${gameState === "betting" ? "bg-yellow-900 text-yellow-300" : gameState === "result" ? "bg-green-900 text-green-300" : "bg-gray-800 text-gray-400"}`}>
+              {stateLabel[gameState]}
+            </span>
+          )}
+          {isLowConf && (
+            <span className="text-[10px] px-1.5 py-0.5 bg-yellow-900/60 text-yellow-600 border border-yellow-800/50 rounded">低信頼度</span>
+          )}
+        </div>
+        <span className="text-[10px] text-gray-600">※ 現在進行中のラウンドの予測です</span>
+      </div>
+
+      {/* メイン予測 — 3カラムグリッド */}
+      <div className="grid grid-cols-3 gap-3 mb-3">
+        {MAIN.map(({ key, emoji, label, bar, ring }) => {
+          const pct = Math.round(prediction[key] * 100);
+          const isPred = prediction.predicted === key;
+          const gap = gaps?.[key];
+          return (
+            <div
+              key={key}
+              className={`rounded-lg p-3 flex flex-col items-center gap-1 transition ${
+                isPred
+                  ? `bg-gray-800 ring-2 ${ring} shadow-lg`
+                  : "bg-gray-900/60 opacity-60"
+              }`}
+            >
+              <span className="text-2xl">{emoji}</span>
+              <span className="text-xs text-gray-400">{label}</span>
+              <span className={`text-2xl font-black ${isPred ? "text-white" : "text-gray-500"}`}>{pct}%</span>
+              <div className="w-full h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                <div className={`h-full ${bar}`} style={{ width: `${pct}%` }} />
+              </div>
+              {isPred && (
+                <span className="text-[10px] font-bold text-yellow-300 mt-0.5">← 予測</span>
+              )}
+              {gap != null && (
+                <span className="text-[9px] text-gray-600">前回{gap}G前</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* サイドベット予測 */}
+      {sideBet && (
+        <div className="border-t border-gray-700/50 pt-3">
+          <p className="text-[10px] text-gray-500 font-semibold mb-2">サイドベット予測（50%以上で YES）</p>
+          <div className="grid grid-cols-4 gap-1.5">
+            {SIDE.map(({ key, label }) => {
+              const prob = (sideBet as Record<string, number | null | undefined>)[key];
+              if (prob == null) return null;
+              const pct = Math.round(prob * 100);
+              const isYes = pct >= 50;
+              const gap = gaps?.[key];
+              return (
+                <div
+                  key={key}
+                  className={`rounded px-2 py-1.5 text-center ${
+                    isYes
+                      ? "bg-green-900/50 border border-green-700/60"
+                      : "bg-gray-800/50 border border-gray-700/30"
+                  }`}
+                >
+                  <div className="text-[9px] text-gray-400 mb-0.5">{label}</div>
+                  <div className={`text-xs font-bold ${isYes ? "text-green-300" : "text-gray-600"}`}>
+                    {isYes ? "YES" : "—"}
+                  </div>
+                  <div className={`text-[9px] ${isYes ? "text-green-500" : "text-gray-600"}`}>{pct}%</div>
+                  {gap != null && (
+                    <div className="text-[8px] text-gray-700">{gap}G前</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ── キャプチャ内コンパクトゲージ（折りたたみ内専用）────────────────────────
+function PredictionGauge({ prediction, sideBet, gaps }: {
   prediction: {
     cowboy: number;
     draw: number;
@@ -1058,33 +1222,97 @@ function PredictionGauge({ prediction }: {
     predicted: "cowboy" | "draw" | "bull";
     model_version: string;
   };
+  sideBet?: SideBetPred;
+  gaps?: Record<string, number>;
 }) {
   const entries: { key: "cowboy" | "draw" | "bull"; emoji: string; color: string }[] = [
     { key: "cowboy", emoji: "🤠", color: "bg-red-600" },
     { key: "bull",   emoji: "🐂", color: "bg-blue-600" },
     { key: "draw",   emoji: "🎲", color: "bg-green-600" },
   ];
+  const sideBetEntries: { key: string; label: string }[] = [
+    { key: "any_flash", label: "FL/CN" },
+    { key: "any_pair",  label: "1ペア" },
+    { key: "any_ace",   label: "Aペア" },
+    { key: "win_high",  label: "ハイ/1P" },
+    { key: "win_two",   label: "2ペア" },
+    { key: "win_sf",    label: "3K+" },
+    { key: "win_fh",    label: "FH" },
+    { key: "win_four",  label: "4K+" },
+  ];
+  const maxPct = Math.max(
+    Math.round(prediction.cowboy * 100),
+    Math.round(prediction.draw   * 100),
+    Math.round(prediction.bull   * 100),
+  );
+  const isLowConf = maxPct < 40;
   return (
     <div className="mt-2 border-t border-gray-700 pt-2 space-y-1">
-      <div className="text-xs text-gray-400 font-semibold mb-1">【予測】</div>
+      <div className="text-xs text-gray-400 font-semibold mb-1">【AI予測】</div>
       {entries.map(({ key, emoji, color }) => {
         const pct = Math.round(prediction[key] * 100);
         const isPredicted = prediction.predicted === key;
+        const gap = gaps?.[key];
         return (
-          <div key={key} className="flex items-center gap-2">
+          <div
+            key={key}
+            className={`flex items-center gap-2 rounded px-1 py-0.5 ${isPredicted ? "bg-yellow-950/40 ring-1 ring-yellow-700/50" : ""}`}
+          >
             <span className="w-5 text-center text-sm">{emoji}</span>
-            <div className="flex-1 h-3 bg-gray-800 rounded-full overflow-hidden">
-              <div className={`h-full ${color} transition-all`} style={{ width: `${pct}%` }} />
+            <div className={`flex-1 h-3 rounded-full overflow-hidden ${isPredicted ? "bg-gray-700" : "bg-gray-800"}`}>
+              <div
+                className={`h-full transition-all ${isPredicted ? (isLowConf ? "bg-yellow-700" : color) : color}`}
+                style={{ width: `${pct}%` }}
+              />
             </div>
             <span className={`w-8 text-right text-xs font-mono ${isPredicted ? "text-yellow-300 font-bold" : "text-gray-400"}`}>
               {pct}%
             </span>
+            {gap != null && (
+              <span className="text-[10px] text-gray-500 w-12 text-right shrink-0">
+                前回{gap}G前
+              </span>
+            )}
           </div>
         );
       })}
-      <div className="text-xs text-yellow-400 mt-1">
-        → 予測: {prediction.predicted === "cowboy" ? "🤠 Cowboy" : prediction.predicted === "bull" ? "🐂 Bull" : "🎲 Draw"}
+      <div className={`text-xs mt-1 flex items-center gap-2 ${isLowConf ? "text-yellow-600" : "text-yellow-400"}`}>
+        <span>→ 予測: {prediction.predicted === "cowboy" ? "🤠 Cowboy" : prediction.predicted === "bull" ? "🐂 Bull" : "🎲 Draw"}</span>
+        {isLowConf && <span className="text-[10px] bg-yellow-900/50 text-yellow-600 border border-yellow-800/50 rounded px-1.5 py-0.5">低信頼度</span>}
       </div>
+      {sideBet && (
+        <div className="mt-2 border-t border-gray-800 pt-2">
+          <div className="text-xs text-gray-500 font-semibold mb-1">【サイドベット予測】</div>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
+            {sideBetEntries.map(({ key, label }) => {
+              const prob = sideBet[key];
+              if (prob == null) return null;
+              const pct = Math.round(prob * 100);
+              const isHigh = pct >= 55;
+              const gap = gaps?.[key];
+              return (
+                <div key={key} className="flex items-center gap-1.5">
+                  <span className={`text-[10px] w-10 text-right shrink-0 ${isHigh ? "text-yellow-300 font-bold" : "text-gray-500"}`}>
+                    {label}
+                  </span>
+                  <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full transition-all ${isHigh ? "bg-yellow-500" : "bg-gray-600"}`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className={`text-[10px] w-6 text-right font-mono shrink-0 ${isHigh ? "text-yellow-300 font-bold" : "text-gray-600"}`}>
+                    {pct}%
+                  </span>
+                  {gap != null && (
+                    <span className="text-[10px] text-gray-600 w-10 text-right shrink-0">{gap}G前</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

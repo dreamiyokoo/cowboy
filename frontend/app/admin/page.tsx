@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import AppHeader from "@/app/components/AppHeader";
 
 interface LogFile {
   filename: string;
@@ -224,35 +225,7 @@ export default function AdminPage() {
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
-      {/* ヘッダー */}
-      <header className="sticky top-0 z-10 flex items-center justify-between bg-gray-900/80 backdrop-blur border-b border-gray-800 px-6 py-3">
-        <div className="flex items-center gap-2">
-          <span className="text-lg">⚙️</span>
-          <h1 className="text-lg font-bold text-yellow-400 font-mono">
-            Cowboy Admin Panel
-          </h1>
-        </div>
-        <div className="flex items-center gap-3">
-          <Link
-            href="/dashboard"
-            className="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 transition"
-          >
-            ← ダッシュボード
-          </Link>
-          <Link
-            href="/predictions"
-            className="text-xs px-3 py-1.5 rounded bg-yellow-950/40 hover:bg-yellow-900/60 border border-yellow-900/30 text-yellow-300 transition"
-          >
-            🔮 AI予測
-          </Link>
-          <button
-            onClick={handleLogout}
-            className="text-xs px-3 py-1.5 rounded bg-red-950 hover:bg-red-900 text-red-300 transition"
-          >
-            ログアウト
-          </button>
-        </div>
-      </header>
+      <AppHeader currentPage="admin" onLogout={handleLogout} />
 
       <main className="p-4 md:p-6 max-w-6xl mx-auto space-y-6">
         {error && (

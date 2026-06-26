@@ -16,6 +16,58 @@ RANK_TO_NUM = {r: i + 2 for i, r in enumerate(RANK_ORDER)}
 RESULT_TO_INT = {"cowboy": 0, "draw": 1, "bull": 2}
 
 
+SIDE_BET_KEYS = ["any_flash", "any_pair", "any_ace", "win_high", "win_two", "win_sf", "win_fh", "win_four"]
+
+
+def load_side_bet_models(path: Path) -> dict | None:
+    """サイドベットモデル辞書をロード。存在しない場合は None。"""
+    try:
+        path = Path(path)
+        if not path.exists():
+            return None
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except Exception as e:
+        print(f"[WARN] サイドベットモデルロード失敗: {e}")
+        return None
+
+
+def predict_side_bets(
+    models: dict,
+    open_card: str,
+    recent_games: list[dict],
+    jackpot_stock: int | None = None,
+    now: datetime | None = None,
+    current_bets: dict | None = None,
+) -> dict:
+    """
+    サイドベット各種の勝利確率を返す。
+
+    Returns:
+        {"any_flash": 0.53, "any_pair": 0.10, ...}
+    """
+    if now is None:
+        now = datetime.now()
+    result: dict = {}
+    try:
+        features = build_features(open_card, recent_games, jackpot_stock, now, current_bets)
+        feat_keys = sorted(features.keys())
+        X = [[features.get(k, 0.0) for k in feat_keys]]
+        for key in SIDE_BET_KEYS:
+            model = models.get(key)
+            if model is None:
+                result[key] = None
+                continue
+            try:
+                proba = model.predict_proba(X)[0]
+                result[key] = round(float(proba[1]), 4)
+            except Exception:
+                result[key] = None
+    except Exception as e:
+        print(f"[WARN] サイドベット予測失敗: {e}")
+    return result
+
+
 def load_model(path: Path) -> Any | None:
     """モデルファイル（.pkl）をロードして返す。存在しない場合は None。"""
     try:
@@ -45,6 +97,7 @@ def build_features(
     recent_games: list[dict],
     jackpot_stock: int | None,
     now: datetime,
+    current_bets: dict | None = None,
 ) -> dict:
     """
     特徴量辞書を構築する。recent_games は新しい順のゲーム履歴リスト。
@@ -118,6 +171,27 @@ def build_features(
     features["hour"] = float(now.hour)
     features["dow"] = float(now.weekday())
 
+    # ── ベット特徴量 ──────────────────────────────────────────
+    for i in range(1, 4):
+        g = valid[i - 1] if i - 1 < len(valid) else None
+        if g:
+            bc = g.get("bet_cowboy") or 0
+            bb = g.get("bet_bull") or 0
+            total = bc + bb
+            features[f"prev_bet_c_ratio_{i}"] = bc / total if total > 0 else 0.5
+        else:
+            features[f"prev_bet_c_ratio_{i}"] = 0.5
+
+    if current_bets:
+        bc = current_bets.get("cowboy") or 0
+        bb = current_bets.get("bull") or 0
+        total = bc + bb
+        features["cur_bet_c_ratio"] = bc / total if total > 0 else 0.5
+        features["cur_has_bets"] = 1.0
+    else:
+        features["cur_bet_c_ratio"] = 0.5
+        features["cur_has_bets"] = 0.0
+
     return features
 
 
@@ -127,6 +201,7 @@ def predict(
     recent_games: list[dict],
     jackpot_stock: int | None = None,
     now: datetime | None = None,
+    current_bets: dict | None = None,
 ) -> dict | None:
     """
     予測確率を返す。モデル未ロード時は None。
@@ -141,8 +216,9 @@ def predict(
         now = datetime.now()
 
     try:
-        features = build_features(open_card, recent_games, jackpot_stock, now)
-        feature_names = getattr(model, "feature_names_in_", None) or list(features.keys())
+        features = build_features(open_card, recent_games, jackpot_stock, now, current_bets)
+        feature_names_attr = getattr(model, "feature_names_in_", None)
+        feature_names = list(feature_names_attr) if feature_names_attr is not None else list(features.keys())
         X = [[features.get(f, 0.0) for f in feature_names]]
 
         proba = model.predict_proba(X)[0]

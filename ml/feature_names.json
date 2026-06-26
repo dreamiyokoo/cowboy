@@ -30,5 +30,10 @@
   "cowboy_rate_50",
   "draw_rate_50",
   "hour",
-  "dow"
+  "dow",
+  "prev_bet_c_ratio_1",
+  "prev_bet_c_ratio_2",
+  "prev_bet_c_ratio_3",
+  "cur_bet_c_ratio",
+  "cur_has_bets"
 ]

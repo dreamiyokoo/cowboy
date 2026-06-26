@@ -22,6 +22,8 @@ FEATURE_NAMES: list[str] = (
     + ["cowboy_streak", "bull_streak", "cowboy_rate_10", "bull_rate_10",
        "cowboy_rate_50", "draw_rate_50"]
     + ["hour", "dow"]
+    + [f"prev_bet_c_ratio_{i}" for i in range(1, 4)]
+    + ["cur_bet_c_ratio", "cur_has_bets"]
 )
 
 
@@ -40,6 +42,7 @@ def build_features(
     recent_games: list[dict],
     jackpot_stock: int | None,
     now: datetime,
+    current_bets: dict | None = None,
 ) -> dict:
     """
     特徴量辞書を構築する。recent_games は新しい順のゲーム履歴リスト。
@@ -109,6 +112,30 @@ def build_features(
 
     features["hour"] = float(now.hour)
     features["dow"] = float(now.weekday())
+
+    # ── ベット特徴量 ──────────────────────────────────────────
+    # 直近3ゲームのカウボーイ賭け率（cowboy / (cowboy + bull)）
+    # ハウスが多い方を負けさせる傾向があるかを学習させる
+    for i in range(1, 4):
+        g = valid[i - 1] if i - 1 < len(valid) else None
+        if g:
+            bc = g.get("bet_cowboy") or 0
+            bb = g.get("bet_bull") or 0
+            total = bc + bb
+            features[f"prev_bet_c_ratio_{i}"] = bc / total if total > 0 else 0.5
+        else:
+            features[f"prev_bet_c_ratio_{i}"] = 0.5
+
+    # 現在ゲームのベット比率（ベット確定後に再予測する際に渡される）
+    if current_bets:
+        bc = current_bets.get("cowboy") or 0
+        bb = current_bets.get("bull") or 0
+        total = bc + bb
+        features["cur_bet_c_ratio"] = bc / total if total > 0 else 0.5
+        features["cur_has_bets"] = 1.0
+    else:
+        features["cur_bet_c_ratio"] = 0.5
+        features["cur_has_bets"] = 0.0
 
     return features
 

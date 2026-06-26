@@ -88,6 +88,10 @@ def build_dataset(games: list[dict]) -> tuple[list[list[float]], list[int]]:
             recent,
             game.get("jackpot_stock"),
             now,
+            current_bets={
+                "cowboy": game.get("bet_cowboy"),
+                "bull":   game.get("bet_bull"),
+            },
         )
         X.append(features_to_row(feats))
         y.append(RESULT_TO_INT[game["result"]])

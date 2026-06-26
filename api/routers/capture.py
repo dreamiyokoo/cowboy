@@ -39,6 +39,8 @@ class CapturePreviewPayload(BaseModel):
     jackpot_stock_image: str | None = None                   # ジャックポットクロップ画像
     timer_value: int | None = None                           # タイマーOCR検出値（カウントダウン秒数）
     timer_image: str | None = None                           # タイマークロップ画像
+    prediction: dict | None = None                           # ML予測結果 {cowboy, draw, bull, predicted, model_version}
+    side_bet_prediction: dict | None = None                  # サイドベット予測 {any_flash, any_pair, ...}
 
 
 

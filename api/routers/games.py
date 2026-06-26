@@ -66,12 +66,22 @@ class GamePostRequest(BaseModel):
     # ラウンドログのファイル名
     log_file_name: str | None = None
 
-    # ML予測フィールド
+    # ML予測フィールド（メイン結果）
     pred_cowboy:   float | None = None
     pred_draw:     float | None = None
     pred_bull:     float | None = None
     pred_result:   str | None   = None
     model_version: str | None   = None
+
+    # ML予測フィールド（サイドベット）
+    pred_any_flash: float | None = None
+    pred_any_pair:  float | None = None
+    pred_any_ace:   float | None = None
+    pred_win_high:  float | None = None
+    pred_win_two:   float | None = None
+    pred_win_sf:    float | None = None
+    pred_win_fh:    float | None = None
+    pred_win_four:  float | None = None
 
     @field_validator("cowboy_hand", "bull_hand")
     @classmethod
@@ -134,6 +144,14 @@ def _row_to_dict(row) -> dict:
     d["pred_bull"]     = getattr(row, "pred_bull",     None)
     d["pred_result"]   = getattr(row, "pred_result",   None)
     d["model_version"] = getattr(row, "model_version", None)
+    d["pred_any_flash"] = getattr(row, "pred_any_flash", None)
+    d["pred_any_pair"]  = getattr(row, "pred_any_pair",  None)
+    d["pred_any_ace"]   = getattr(row, "pred_any_ace",   None)
+    d["pred_win_high"]  = getattr(row, "pred_win_high",  None)
+    d["pred_win_two"]   = getattr(row, "pred_win_two",   None)
+    d["pred_win_sf"]    = getattr(row, "pred_win_sf",    None)
+    d["pred_win_fh"]    = getattr(row, "pred_win_fh",    None)
+    d["pred_win_four"]  = getattr(row, "pred_win_four",  None)
     return d
 
 
@@ -165,7 +183,9 @@ async def post_game(
             "  win_any_flash, win_any_pair, win_any_ace,"
             "  win_high, win_two, win_sf, win_fh, win_four,"
             "  card_image, ocr_debug, log_file_name,"
-            "  pred_cowboy, pred_draw, pred_bull, pred_result, model_version"
+            "  pred_cowboy, pred_draw, pred_bull, pred_result, model_version,"
+            "  pred_any_flash, pred_any_pair, pred_any_ace,"
+            "  pred_win_high, pred_win_two, pred_win_sf, pred_win_fh, pred_win_four"
             ") VALUES ("
             "  :open_card, :result, :cowboy_hand, :bull_hand, :round_number, :jackpot_stock,"
             "  :bet_cowboy, :bet_draw, :bet_bull,"
@@ -174,7 +194,9 @@ async def post_game(
             "  :win_any_flash, :win_any_pair, :win_any_ace,"
             "  :win_high, :win_two, :win_sf, :win_fh, :win_four,"
             "  :card_image, :ocr_debug, :log_file_name,"
-            "  :pred_cowboy, :pred_draw, :pred_bull, :pred_result, :model_version"
+            "  :pred_cowboy, :pred_draw, :pred_bull, :pred_result, :model_version,"
+            "  :pred_any_flash, :pred_any_pair, :pred_any_ace,"
+            "  :pred_win_high, :pred_win_two, :pred_win_sf, :pred_win_fh, :pred_win_four"
             ") RETURNING "
             "  id, open_card, result, cowboy_hand, bull_hand, round_number, recorded_at,"
             "  jackpot_stock,"
@@ -184,7 +206,9 @@ async def post_game(
             "  win_any_flash, win_any_pair, win_any_ace,"
             "  win_high, win_two, win_sf, win_fh, win_four,"
             "  card_image, ocr_debug, log_file_name,"
-            "  pred_cowboy, pred_draw, pred_bull, pred_result, model_version"
+            "  pred_cowboy, pred_draw, pred_bull, pred_result, model_version,"
+            "  pred_any_flash, pred_any_pair, pred_any_ace,"
+            "  pred_win_high, pred_win_two, pred_win_sf, pred_win_fh, pred_win_four"
         ),
         {
             "open_card": body.open_card, "result": body.result,
@@ -200,6 +224,9 @@ async def post_game(
             "card_image": body.card_image, "ocr_debug": body.ocr_debug, "log_file_name": body.log_file_name,
             "pred_cowboy": body.pred_cowboy, "pred_draw": body.pred_draw, "pred_bull": body.pred_bull,
             "pred_result": body.pred_result, "model_version": body.model_version,
+            "pred_any_flash": body.pred_any_flash, "pred_any_pair": body.pred_any_pair, "pred_any_ace": body.pred_any_ace,
+            "pred_win_high": body.pred_win_high, "pred_win_two": body.pred_win_two, "pred_win_sf": body.pred_win_sf,
+            "pred_win_fh": body.pred_win_fh, "pred_win_four": body.pred_win_four,
         },
     )
     row = inserted.fetchone()
@@ -445,6 +472,107 @@ async def get_round_log(
             detail="Log file not found"
         )
     return FileResponse(log_path, media_type="text/plain")
+
+
+@router.get("/archive")
+async def get_games_archive(
+    by: Literal["day", "hour"] = Query(default="day"),
+    tz_offset: int = Query(default=9, description="UTC+N タイムゾーンオフセット（時間）"),
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(get_current_user),
+):
+    """ゲーム履歴を日別 / 時間別に集計して返す（アーカイブ表示用）"""
+    from collections import defaultdict
+    from datetime import timezone, timedelta
+
+    rows = await db.execute(text("""
+        SELECT recorded_at, result,
+               COALESCE(bet_cowboy,0) AS bet_cowboy,
+               COALESCE(bet_draw,0)   AS bet_draw,
+               COALESCE(bet_bull,0)   AS bet_bull,
+               COALESCE(bet_any_flash,0) AS bet_any_flash,
+               COALESCE(bet_any_pair,0)  AS bet_any_pair,
+               COALESCE(bet_any_ace,0)   AS bet_any_ace,
+               COALESCE(bet_win_high,0)  AS bet_win_high,
+               COALESCE(bet_win_two,0)   AS bet_win_two,
+               COALESCE(bet_win_sf,0)    AS bet_win_sf,
+               COALESCE(bet_win_fh,0)    AS bet_win_fh,
+               COALESCE(bet_win_four,0)  AS bet_win_four,
+               win_any_flash, win_any_pair, win_any_ace,
+               win_high, win_two, win_sf, win_fh, win_four
+        FROM games
+        WHERE result != 'error'
+        ORDER BY recorded_at ASC
+    """))
+    games_raw = rows.fetchall()
+
+    _MAIN_ODDS = {"cowboy": 2.02, "bull": 2.02, "draw": 22.0}
+    _SIDE_ODDS = {
+        "win_any_flash": ("bet_any_flash", 1.67),
+        "win_any_pair":  ("bet_any_pair",  8.5),
+        "win_any_ace":   ("bet_any_ace",   100.0),
+        "win_high":      ("bet_win_high",  2.2),
+        "win_two":       ("bet_win_two",   3.1),
+        "win_sf":        ("bet_win_sf",    4.7),
+        "win_fh":        ("bet_win_fh",    20.5),
+        "win_four":      ("bet_win_four",  250.0),
+    }
+
+    tz = timezone(timedelta(hours=tz_offset))
+    buckets: dict = defaultdict(lambda: {
+        "game_count": 0, "cowboy": 0, "bull": 0, "draw": 0,
+        "total_bet": 0, "total_payout": 0,
+        "win_any_flash": 0, "win_any_pair": 0, "win_any_ace": 0,
+        "win_high": 0, "win_two": 0, "win_sf": 0, "win_fh": 0, "win_four": 0,
+    })
+
+    for g in games_raw:
+        local_dt = g.recorded_at.astimezone(tz) if g.recorded_at.tzinfo else g.recorded_at.replace(tzinfo=timezone.utc).astimezone(tz)
+        key = local_dt.strftime("%Y-%m-%d") if by == "day" else local_dt.strftime("%Y-%m-%d %H:00")
+        b = buckets[key]
+        b["game_count"] += 1
+        b[g.result] = b.get(g.result, 0) + 1
+
+        total_bet = g.bet_cowboy + g.bet_draw + g.bet_bull + g.bet_any_flash + g.bet_any_pair + g.bet_any_ace + g.bet_win_high + g.bet_win_two + g.bet_win_sf + g.bet_win_fh + g.bet_win_four
+        b["total_bet"] += total_bet
+
+        # メインベット払い出し
+        main_bet = getattr(g, f"bet_{g.result}", 0) or 0
+        payout = int(main_bet * _MAIN_ODDS.get(g.result, 0))
+        # サイドベット払い出し
+        for win_col, (bet_col, odds) in _SIDE_ODDS.items():
+            if getattr(g, win_col):
+                b[win_col] += 1
+                payout += int(getattr(g, bet_col, 0) * odds)
+        b["total_payout"] += payout
+
+    records = []
+    for period in sorted(buckets):
+        b = buckets[period]
+        n = b["game_count"]
+        records.append({
+            "period": period,
+            "game_count": n,
+            "cowboy": b["cowboy"],
+            "bull":   b["bull"],
+            "draw":   b["draw"],
+            "cowboy_rate": round(b["cowboy"] / n, 4) if n else None,
+            "bull_rate":   round(b["bull"]   / n, 4) if n else None,
+            "draw_rate":   round(b["draw"]   / n, 4) if n else None,
+            "total_bet":    b["total_bet"],
+            "total_payout": b["total_payout"],
+            "pnl":          b["total_payout"] - b["total_bet"],
+            "win_any_flash": b["win_any_flash"],
+            "win_any_pair":  b["win_any_pair"],
+            "win_any_ace":   b["win_any_ace"],
+            "win_high":      b["win_high"],
+            "win_two":       b["win_two"],
+            "win_sf":        b["win_sf"],
+            "win_fh":        b["win_fh"],
+            "win_four":      b["win_four"],
+        })
+
+    return {"by": by, "records": records}
 
 
 @router.get("/captures/{game_id}")
